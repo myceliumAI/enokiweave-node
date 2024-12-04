@@ -1,0 +1,29 @@
+[package]
+name = "enokiweave"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+actix-web = "4"
+anyhow = "1.0.86"
+chrono = "0.4.38"
+hyper = "0.12.33"
+libp2p = { version = "0.51", features = [
+    "tokio",
+    "mdns",
+    "floodsub",
+    "tcp",
+    "noise",
+    "yamux",
+    "macros",
+    "identify",
+] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sha2 = "0.10.8"
+tokio = { version = "1.0", features = ["full"] }
+uuid = { version = "1.1", features = ["v4", "serde"] }
+disruptor = "0.2.1"
+hex = "0.4.3"
+tracing = "0.1.41"
+tracing-attributes = "0.1.27"
