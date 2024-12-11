@@ -18,6 +18,9 @@ Enokiweave uses a block-lattice structure where each account operates its own bl
 - No mining or transaction fees
 - Ultra-low latency finalization
 
+## High-level architecture
+![Project Logo](./assets/architecture.png)
+
 ## Getting Started
 
 # Clone the repository
