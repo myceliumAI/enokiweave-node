@@ -1,5 +1,7 @@
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use chrono::Utc;
+use ed25519_dalek::Signature;
+use ed25519_dalek::VerifyingKey;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -10,12 +12,6 @@ const BOB_ADDRESS: Address = Address([2; 32]);
 
 #[derive(Debug, PartialEq, Eq, Hash, Serialize, Deserialize, Clone, Copy)]
 pub struct Address(pub [u8; 32]);
-
-impl Address {
-    fn null_address() -> Address {
-        Address([0; 32])
-    }
-}
 
 impl AsRef<[u8]> for Address {
     fn as_ref(&self) -> &[u8] {
@@ -40,6 +36,7 @@ pub struct TransactionRequest {
     pub from: Address,
     pub to: Address,
     pub amount: u64,
+    pub public_key: [u8; 32],
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -49,11 +46,31 @@ pub struct Transaction {
     pub to: Address,
     pub amount: u64,
     pub timestamp: i64,
+    pub signature: Option<Signature>,
 }
 
 impl Transaction {
-    fn new(from: Address, to: Address, amount: u64) -> Self {
+    pub fn new(from: Address, to: Address, amount: u64) -> Result<Self> {
         let timestamp = Utc::now().timestamp_millis();
+
+        let id = Self::calculate_id(from, to, amount, timestamp)?;
+
+        Ok(Self {
+            id: TransactionId(H256(id)),
+            from,
+            to,
+            amount,
+            timestamp: Utc::now().timestamp_millis(),
+            signature: None,
+        })
+    }
+
+    pub fn calculate_id(
+        from: Address,
+        to: Address,
+        amount: u64,
+        timestamp: i64,
+    ) -> Result<[u8; 32]> {
         let mut hasher = Sha256::new();
         hasher.update(amount.to_be_bytes());
         hasher.update(&from);
@@ -63,52 +80,65 @@ impl Transaction {
         let hash = &hasher.finalize()[..];
 
         let id: [u8; 32] = hash.try_into().expect("Wrong length");
-        Self {
-            id: TransactionId(H256(id)),
-            from,
-            to,
-            amount,
-            timestamp: Utc::now().timestamp_millis(),
-        }
-    }
 
-    // Add this constructor
-    pub fn from_request(req: TransactionRequest) -> Self {
-        Self::new(req.from, req.to, req.amount)
+        Ok(id)
     }
 }
 
 pub struct BlockLattice {
     transactions: HashMap<TransactionId, Transaction>,
     all_transaction_ids: HashSet<TransactionId>,
-
-    latest_transaction_ids: VecDeque<TransactionId>,
+    buffer_incoming_transactions: VecDeque<Transaction>,
 }
 
 impl BlockLattice {
     pub fn new() -> Self {
-        let first_transaction = Transaction::new(Address::null_address(), ALICE_ADDRESS, 0);
-        let second_transaction = Transaction::new(Address::null_address(), BOB_ADDRESS, 0);
-
         Self {
-            transactions: HashMap::from([
-                (first_transaction.id, first_transaction),
-                (second_transaction.id, second_transaction),
-            ]),
+            transactions: HashMap::new(),
             all_transaction_ids: HashSet::new(),
-            latest_transaction_ids: VecDeque::new(),
+            buffer_incoming_transactions: VecDeque::new(),
         }
     }
 
-    pub fn add_transaction(&mut self, from: Address, to: Address, amount: u64) -> Result<String> {
-        let transaction = Transaction::new(from, to, amount);
+    pub fn add_transaction(
+        &mut self,
+        from: Address,
+        to: Address,
+        amount: u64,
+        public_key: VerifyingKey,
+    ) -> Result<String> {
+        let transaction = Transaction::new(from, to, amount)?;
 
-        // Verify that the transaction is valid
-
-        self.all_transaction_ids.insert(transaction.id.clone());
-        self.transactions.insert(transaction.id, transaction);
+        if !Self::is_transaction_valid(transaction, public_key)? {
+            return Err(anyhow!("Transaction is invalid"));
+        }
 
         Ok(transaction.id.clone().0.to_string())
+    }
+
+    pub fn is_transaction_valid(
+        transaction: Transaction,
+        public_key: VerifyingKey,
+    ) -> Result<bool> {
+        let incoming_tx_id = Transaction::calculate_id(
+            transaction.from,
+            transaction.to,
+            transaction.amount,
+            transaction.timestamp,
+        )?;
+        if TransactionId(H256(incoming_tx_id)) != transaction.id {
+            return Err(anyhow!("Transaction ID invalid"));
+        }
+
+        let signature = transaction
+            .signature
+            .ok_or(anyhow!("Signature is missing"))?;
+
+        public_key
+            .verify_strict(&transaction.id.0 .0, &signature)
+            .map_err(|e| anyhow!("Signature verification failed: {}", e))?;
+
+        Ok(true)
     }
 
     pub fn get_transaction(&self, id: [u8; 32]) -> Option<&Transaction> {

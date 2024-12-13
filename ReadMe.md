@@ -32,3 +32,8 @@ git clone https://github.com/enokiweave/enokiweave
 ```bash
 git clone https://github.com/enokiweave/enokiweave
 ```
+
+# Send a transaction
+```bash
+echo '{"jsonrpc":"2.0","method":"submitTransaction","params":[{"from":"sender_address","to":"recipient_address","amount":100,"public_key":[1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1]}],"id":1}' | nc localhost 3000
+```
