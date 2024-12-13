@@ -35,5 +35,5 @@ git clone https://github.com/enokiweave/enokiweave
 
 # Send a transaction
 ```bash
-echo '{"jsonrpc":"2.0","method":"submitTransaction","params":[{"from":"sender_address","to":"recipient_address","amount":100,"public_key":[1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1]}],"id":1}' | nc localhost 3000
+echo '{"jsonrpc":"2.0","method":"submitTransaction","params":[{"from":[1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1], "signature": [1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],"to":[1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],"amount":100,"public_key":[1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1]}],"id":1}' | nc localhost 3000
 ```

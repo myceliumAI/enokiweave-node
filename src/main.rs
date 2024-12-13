@@ -3,7 +3,7 @@ use blocklattice::{BlockLattice, Transaction, TransactionRequest};
 use ed25519_dalek::VerifyingKey;
 use libp2p::futures::StreamExt;
 use libp2p::mdns::tokio::Tokio;
-use libp2p::swarm::{behaviour, NetworkBehaviour};
+use libp2p::swarm::{ NetworkBehaviour};
 use libp2p::{core::upgrade::Version, identity, noise, tcp, yamux, PeerId, Transport};
 use libp2p::{
     floodsub::{Floodsub, FloodsubEvent, Topic},
@@ -27,7 +27,7 @@ mod blocklattice;
 
 #[derive(NetworkBehaviour)]
 #[behaviour(out_event = "OutEvent")]
-struct BlockchainBehaviour {
+struct P2PBlockchainBehaviour {
     floodsub: Floodsub,
     mdns: Mdns<Tokio>,
 }
@@ -75,7 +75,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     // Create a Swarm to manage peers and events
     let mut swarm = {
         let mdns = Mdns::new(Default::default(), local_peer_id)?;
-        let mut behaviour = BlockchainBehaviour {
+        let mut behaviour = P2PBlockchainBehaviour {
             floodsub: Floodsub::new(local_peer_id),
             mdns,
         };
