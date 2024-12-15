@@ -1,11 +1,13 @@
 use anyhow::{anyhow, Result};
+use ed25519_dalek::Signature;
 use ed25519_dalek::VerifyingKey;
 use lmdb::Cursor;
+use lmdb::Transaction as LmdbTransaction;
 use std::path::Path;
 
 use crate::address::Address;
+use crate::transaction::RawTransaction;
 use crate::transaction::{Transaction, TransactionId};
-use lmdb::Transaction as LmdbTransaction;
 pub struct BlockLattice {
     confirmed_transactions_uri: String,
     pending_transactions_uri: String,
@@ -25,8 +27,18 @@ impl BlockLattice {
         to: Address,
         amount: u64,
         public_key: VerifyingKey,
+        timestamp: i64,
+        id: TransactionId,
+        signature: Signature,
     ) -> Result<String> {
-        let transaction = Transaction::new(from, to, amount)?;
+        let transaction = Transaction {
+            from,
+            to,
+            amount,
+            timestamp,
+            id,
+            signature,
+        };
 
         if !Self::is_transaction_valid(transaction, public_key)? {
             return Err(anyhow!("Transaction is invalid"));
@@ -39,22 +51,21 @@ impl BlockLattice {
         transaction: Transaction,
         public_key: VerifyingKey,
     ) -> Result<bool> {
-        let incoming_tx_id = Transaction::calculate_id(
+        let incoming_tx_id = RawTransaction::calculate_id(
             transaction.from,
             transaction.to,
             transaction.amount,
             transaction.timestamp,
         )?;
+
+        println!("{:?}", incoming_tx_id);
+
         if TransactionId(incoming_tx_id) != transaction.id {
             return Err(anyhow!("Transaction ID invalid"));
         }
 
-        let signature = transaction
-            .signature
-            .ok_or(anyhow!("Signature is missing"))?;
-
         public_key
-            .verify_strict(&transaction.id.0, &signature)
+            .verify_strict(&transaction.id.0, &transaction.signature)
             .map_err(|e| anyhow!("Signature verification failed: {}", e))?;
 
         Ok(true)

@@ -326,7 +326,6 @@ async fn handle_request(
             let tx_request: TransactionRequest = serde_json::from_value(params[0].clone())
                 .map_err(|e| format!("Failed to parse transaction request: {}", e))?;
 
-            println!("Adding transaction to blocklattice");
             let mut blocklattice = blocklattice.lock().await;
 
             let tx_id = blocklattice.add_transaction(
@@ -335,6 +334,9 @@ async fn handle_request(
                 tx_request.amount,
                 VerifyingKey::from_bytes(&tx_request.public_key)
                     .map_err(|e| format!("Invalid public key: {}", e))?,
+                tx_request.timestamp,
+                tx_request.id,
+                tx_request.signature,
             )?;
 
             println!("Transaction added successfully with ID: {}", tx_id);
