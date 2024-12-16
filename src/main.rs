@@ -5,9 +5,9 @@ use tracing::Level;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
-    // Initialize logging
+    // Initialize logging with a simple format
     tracing_subscriber::fmt()
-        .with_max_level(Level::INFO)
+        .with_max_level(Level::DEBUG)
         .init();
 
     // Get command line arguments

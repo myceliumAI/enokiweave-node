@@ -13,7 +13,7 @@ use libp2p::{
 };
 use std::{collections::HashMap, time::Duration};
 use tokio::sync::mpsc;
-use tracing::{info, debug, Span};
+use tracing::{info, debug, error};
 
 use super::{
     behaviour::NodeBehaviour,
@@ -28,23 +28,28 @@ pub struct Node {
     pub peer_id: PeerId,
     known_peers: HashMap<PeerId, Multiaddr>,
     swarm: Swarm<NodeBehaviour>,
-    _span: Span, // Keep the span alive for the lifetime of the node
+    node_id: String, // Short node ID for logging
 }
 
 impl Node {
     /// Helper method to get a short node ID for logging
-    fn short_id(&self) -> String {
-        self.peer_id.to_string().split_at(6).0.to_string()
+    fn short_id(&self) -> &str {
+        &self.node_id
+    }
+
+    /// Helper method to format log messages with node ID prefix
+    fn log(&self, message: String) -> String {
+        format!("[Node-{}] {}", self.short_id(), message)
     }
 
     /// Creates a new node with the given configuration
     pub async fn new(config: NodeConfig) -> Result<Self> {
         let id_keys = Keypair::generate_ed25519();
         let peer_id = PeerId::from(id_keys.public());
-        let node_id = peer_id.to_string().split_at(6).0.to_string();
-        let _logger = crate::get_logger!("node");
+        let peer_id_str = peer_id.to_string();
+        let node_id = peer_id_str[peer_id_str.len()-6..].to_string();
         
-        info!("[Node-{}] 💡 Created node with PeerId: {} ({})", node_id, node_id, peer_id);
+        info!("{}", Self::log_static(&node_id, format!("💡 Created node with PeerId: {} ({})", node_id, peer_id)));
         
         let gossipsub = Self::create_gossipsub_behaviour(&id_keys)?;
         let mut behaviour = NodeBehaviour {
@@ -70,18 +75,23 @@ impl Node {
             peer_id,
             known_peers: HashMap::new(),
             swarm,
-            _span: tracing::info_span!("node", id = %node_id),
+            node_id,
         };
 
         // Connect to bootstrap peers if provided
         if !config.bootstrap_peers.is_empty() {
-            info!("[Node-{}] 💡 Connecting to {} bootstrap peers", node_id, config.bootstrap_peers.len());
+            info!("{}", node.log(format!("💡 Connecting to {} bootstrap peers", config.bootstrap_peers.len())));
             node.connect_to_peers(&config.bootstrap_peers).await;
         } else {
-            info!("[Node-{}] 💡 Starting as standalone node", node_id);
+            info!("{}", node.log("💡 Starting as standalone node".to_string()));
         }
 
         Ok(node)
+    }
+
+    /// Helper method for static contexts where self is not available
+    fn log_static(node_id: &str, message: String) -> String {
+        format!("[Node-{}] {}", node_id, message)
     }
 
     /// Creates a gossipsub behavior with optimized settings for our use case
@@ -89,11 +99,11 @@ impl Node {
         let config = gossipsub::ConfigBuilder::default()
             .heartbeat_interval(Duration::from_secs(GOSSIP_INTERVAL))
             .validation_mode(ValidationMode::Permissive)
-            // Allow operating with minimal peers for better bootstrap
-            .mesh_n_low(0)
-            .mesh_n(1)
-            .mesh_n_high(2)
-            .mesh_outbound_min(0)
+            // Use more reasonable mesh sizes for better connectivity
+            .mesh_n_low(2)     // Allow down to 2 peers minimum
+            .mesh_n(4)         // Target 4 peers
+            .mesh_n_high(8)    // Allow up to 8 peers
+            .mesh_outbound_min(2)
             .history_length(10)
             .history_gossip(3)
             .flood_publish(true)
@@ -116,7 +126,6 @@ impl Node {
 
     /// Attempts to discover and connect to a new peer
     async fn discover_peer(&mut self, peer_id: PeerId, addr: Multiaddr) -> Result<bool> {
-        let node_id = self.short_id();
         if peer_id == self.peer_id {
             return Ok(false);
         }
@@ -125,14 +134,14 @@ impl Node {
             if known_addr == &addr {
                 return Ok(false);
             }
-            debug!("[Node-{}] 📝 Updating address for peer {}", node_id, peer_id);
+            debug!("{}", self.log(format!("📝 Updating address for peer {}", peer_id)));
         }
 
         self.known_peers.insert(peer_id, addr.clone());
         
         if !self.swarm.is_connected(&peer_id) {
             if let Err(e) = self.connect_to_peer(addr).await {
-                debug!("[Node-{}] ⚠️ Failed to connect to discovered peer: {}", node_id, e);
+                error!("{}", self.log(format!("⚠️ Failed to connect to discovered peer: {}", e)));
             }
         }
 
@@ -141,9 +150,8 @@ impl Node {
 
     /// Broadcasts our known peers to the network for peer discovery
     async fn broadcast_known_peers(&mut self) -> Result<()> {
-        let node_id = self.short_id();
         if self.known_peers.is_empty() {
-            debug!("[Node-{}] 📢 No peers to broadcast (standalone mode)", node_id);
+            debug!("{}", self.log("📢 No peers to broadcast (standalone mode)".to_string()));
             return Ok(());
         }
 
@@ -159,11 +167,11 @@ impl Node {
         
         match self.swarm.behaviour_mut().gossipsub.publish(topic, encoded.as_bytes()) {
             Ok(_) => {
-                debug!("[Node-{}] 📢 Broadcasting {} known peers", node_id, self.known_peers.len());
+                debug!("{}", self.log(format!("📢 Broadcasting {} known peers", self.known_peers.len())));
                 Ok(())
             },
             Err(PublishError::InsufficientPeers) => {
-                debug!("[Node-{}] 📢 Skipping broadcast: no peers available yet", node_id);
+                debug!("{}", self.log("📝 Skipping broadcast: no peers available yet".to_string()));
                 Ok(())
             },
             Err(e) => Err(anyhow!("Failed to publish gossip message: {}", e))
@@ -172,7 +180,6 @@ impl Node {
 
     /// Starts the node, listening for connections and handling events
     pub async fn start(&mut self) -> Result<()> {
-        let node_id = self.short_id();
         self.swarm.listen_on(self.config.address.clone())?;
 
         // Start health check loop with peer info
@@ -180,16 +187,22 @@ impl Node {
         let (health_tx, mut health_rx) = mpsc::channel::<HashMap<PeerId, Multiaddr>>(32);
         let health_tx_clone = health_tx.clone();
         let health_interval = self.config.health_check_interval;
+        let node_id = self.node_id.clone();
 
         // Start health check loop
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(health_interval));
-            let node_id = peer_id.to_string().split_at(6).0.to_string();
+            let mut last_log = std::time::Instant::now();
             loop {
                 interval.tick().await;
-                debug!("[Node-{}] 💡 Health check for node: {}", node_id, peer_id);
+                // Only log health check status every 5 minutes unless there's an error
+                let should_log = last_log.elapsed() >= Duration::from_secs(300);
+                if should_log {
+                    debug!("[Node-{}] 💡 Health check for node: {}", node_id, peer_id);
+                    last_log = std::time::Instant::now();
+                }
                 if let Err(e) = health_tx_clone.send(HashMap::new()).await {
-                    debug!("[Node-{}] ⚠️ Failed to trigger health check: {}", node_id, e);
+                    error!("[Node-{}] ⚠️ Failed to trigger health check: {}", node_id, e);
                     break;
                 }
             }
@@ -198,12 +211,14 @@ impl Node {
         // Start gossip loop for peer discovery
         let (tx, mut rx) = mpsc::channel(32);
         let tx_clone = tx.clone();
+        let node_id = self.node_id.clone();
 
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(GOSSIP_INTERVAL));
             loop {
                 interval.tick().await;
                 if tx_clone.send(()).await.is_err() {
+                    error!("[Node-{}] ⚠️ Gossip loop terminated", node_id);
                     break;
                 }
             }
@@ -214,15 +229,15 @@ impl Node {
             tokio::select! {
                 Some(_) = rx.recv() => {
                     if let Err(e) = self.broadcast_known_peers().await {
-                        debug!("[Node-{}] ⚠️ Failed to broadcast peers: {}", node_id, e);
+                        error!("{}", self.log(format!("⚠️ Failed to broadcast peers: {}", e)));
                     }
                 }
                 Some(_) = health_rx.recv() => {
-                    // Log network status during health check
+                    // Log network status during health check only if there are peers
                     if !self.known_peers.is_empty() {
-                        info!("[Node-{}] 📊 Node has {} connections:", node_id, self.known_peers.len());
+                        info!("{}", self.log(format!("📊 Node has {} connections:", self.known_peers.len())));
                         for (peer_id, addr) in self.known_peers.iter() {
-                            info!("[Node-{}]   ├─ {} at {}", node_id, peer_id.to_string().split_at(6).0, addr);
+                            info!("{}   ├─ {} at {}", self.log("".to_string()), peer_id.to_string().split_at(6).0, addr);
                         }
                     }
                 }
@@ -240,41 +255,43 @@ impl Node {
 
     /// Attempts to connect to a peer at the given address
     pub async fn connect_to_peer(&mut self, addr: Multiaddr) -> Result<()> {
-        let node_id = self.short_id();
-        info!("[Node-{}] 🔌 Attempting to connect to peer at {}", node_id, addr);
+        info!("{}", self.log(format!("🔌 Attempting to connect to peer at {}", addr)));
         self.swarm.dial(addr)?;
         Ok(())
     }
 
     /// Attempts to connect to multiple peers
     pub async fn connect_to_peers(&mut self, addrs: &[Multiaddr]) {
-        let node_id = self.short_id();
+        info!("{}", self.log(format!("🔌 Attempting to connect to {} peers", addrs.len())));
         for addr in addrs {
-            if let Err(e) = self.connect_to_peer(addr.clone()).await {
-                debug!("[Node-{}] ⚠️ Failed to connect to {}: {}", node_id, addr, e);
+            match self.connect_to_peer(addr.clone()).await {
+                Ok(_) => {
+                    info!("{}", self.log(format!("✅ Successfully initiated connection to {}", addr)));
+                }
+                Err(e) => {
+                    error!("{}", self.log(format!("❌ Failed to connect to {}: {}", addr, e)));
+                }
             }
         }
     }
 
     /// Removes a peer from our known peers list
     fn remove_peer(&mut self, peer_id: &PeerId) {
-        let node_id = self.short_id();
         if self.known_peers.remove(peer_id).is_some() {
-            info!("[Node-{}] ❎ Removed peer: {}", node_id, peer_id);
+            info!("{}", self.log(format!("❎ Removed peer: {}", peer_id)));
         }
     }
 
     /// Handles network events from the swarm
     async fn handle_swarm_event(&mut self, event: SwarmEvent<NodeEvent>) -> Result<()> {
-        let node_id = self.short_id();
         match event {
             SwarmEvent::Behaviour(NodeEvent::Ping(ping::Event { peer, result, .. })) => {
                 match result {
                     Ok(duration) => {
-                        debug!("[Node-{}]  Ping success: {} responded in {:?}", node_id, peer, duration);
+                        debug!("{}", self.log(format!("✅ Ping success: {} responded in {:?}", peer, duration)));
                     }
                     Err(error) => {
-                        debug!("[Node-{}] ⚠️ Ping failure: {} error: {}", node_id, peer, error);
+                        error!("{}", self.log(format!("⚠️ Ping failure: {} error: {}", peer, error)));
                         if !self.swarm.is_connected(&peer) {
                             self.remove_peer(&peer);
                         }
@@ -282,10 +299,10 @@ impl Node {
                 }
             }
             SwarmEvent::NewListenAddr { address, .. } => {
-                info!("[Node-{}] ✅ Listening on: {}", node_id, address);
+                info!("{}", self.log(format!("✅ Listening on: {}", address)));
             }
             SwarmEvent::ConnectionEstablished { peer_id, endpoint, .. } => {
-                info!("[Node-{}] ✅ Connected to: {}", node_id, peer_id);
+                info!("{}", self.log(format!("✅ Connected to: {}", peer_id)));
                 let addr = endpoint.get_remote_address();
                 if self.discover_peer(peer_id, addr.clone()).await? {
                     self.broadcast_known_peers().await?;
@@ -293,13 +310,13 @@ impl Node {
             }
             SwarmEvent::ConnectionClosed { peer_id, .. } => {
                 if !self.swarm.is_connected(&peer_id) {
-                    debug!("[Node-{}] ⚠️ All connections closed to: {}", node_id, peer_id);
+                    error!("{}", self.log(format!("⚠️ All connections closed to: {}", peer_id)));
                     self.remove_peer(&peer_id);
                 }
             }
             SwarmEvent::Behaviour(NodeEvent::Gossipsub(gossipsub::Event::Message { message, .. })) => {
                 let gossip: GossipMessage = serde_json::from_slice(&message.data)?;
-                debug!("[Node-{}] 📨 Received peer list from {}", node_id, gossip.sender);
+                debug!("{}", self.log(format!("📨 Received peer list from {}", gossip.sender)));
 
                 let mut new_peers = false;
                 for (peer_id_str, addr_str) in gossip.known_peers {
@@ -318,7 +335,7 @@ impl Node {
                 }
             }
             _ => {
-                debug!("[Node-{}] 📝 Unhandled event: {:?}", node_id, event);
+                debug!("{}", self.log(format!("📝 Unhandled event: {:?}", event)));
             }
         }
         Ok(())
