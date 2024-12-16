@@ -4,18 +4,22 @@ use libp2p::{
     swarm::NetworkBehaviour,
 };
 
-/// Represents the behavior of our P2P node
+/// Combined network behavior for our P2P node
 #[derive(NetworkBehaviour)]
 #[behaviour(out_event = "NodeEvent")]
 pub struct NodeBehaviour {
+    /// Ping protocol for peer health checks
     pub ping: ping::Behaviour,
+    /// Gossipsub protocol for peer discovery
     pub gossipsub: GossipsubBehaviour,
 }
 
-/// Events that can be emitted by our node
+/// Events that can be emitted by our network behavior
 #[derive(Debug)]
 pub enum NodeEvent {
+    /// Ping protocol events
     Ping(ping::Event),
+    /// Gossipsub protocol events
     Gossipsub(gossipsub::Event),
 }
 
