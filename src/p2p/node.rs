@@ -15,6 +15,7 @@ use std::{collections::HashMap, time::Duration};
 use tokio::sync::mpsc;
 use tracing::{info, debug, error};
 
+
 use super::{
     behaviour::NodeBehaviour,
     config::NodeConfig,
@@ -190,7 +191,7 @@ impl Node {
         let node_id = self.node_id.clone();
 
         // Start health check loop
-        tokio::spawn(async move {
+        let health_handle = tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(health_interval));
             let mut last_log = std::time::Instant::now();
             loop {
@@ -213,7 +214,7 @@ impl Node {
         let tx_clone = tx.clone();
         let node_id = self.node_id.clone();
 
-        tokio::spawn(async move {
+        let gossip_handle = tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(GOSSIP_INTERVAL));
             loop {
                 interval.tick().await;
@@ -247,8 +248,16 @@ impl Node {
                         None => break,
                     }
                 }
+                else => {
+                    debug!("{}", self.log("💡 Main loop shutting down".to_string()));
+                    break;
+                }
             }
         }
+
+        // Clean up background tasks
+        health_handle.abort();
+        gossip_handle.abort();
 
         Ok(())
     }
