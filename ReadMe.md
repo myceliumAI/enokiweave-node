@@ -30,7 +30,7 @@ git clone https://github.com/enokiweave/enokiweave
 
 # Run the node
 ```bash
-git clone https://github.com/enokiweave/enokiweave
+make run
 ```
 
 # Send a transaction
