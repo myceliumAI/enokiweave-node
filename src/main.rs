@@ -1,9 +1,9 @@
 use anyhow::{anyhow, Result};
-use blocklattice::{BlockLattice, Transaction, TransactionRequest};
+use blocklattice::BlockLattice;
 use ed25519_dalek::VerifyingKey;
 use libp2p::futures::StreamExt;
 use libp2p::mdns::tokio::Tokio;
-use libp2p::swarm::{ NetworkBehaviour};
+use libp2p::swarm::NetworkBehaviour;
 use libp2p::{core::upgrade::Version, identity, noise, tcp, yamux, PeerId, Transport};
 use libp2p::{
     floodsub::{Floodsub, FloodsubEvent, Topic},
@@ -12,6 +12,8 @@ use libp2p::{
 };
 use lmdb::Transaction as LmdbTransaction;
 use serde_json::Value as JsonValue;
+use sha2::Digest;
+use sha2::Sha256;
 use std::error::Error;
 use std::net::SocketAddr;
 use std::path::Path;
@@ -23,7 +25,11 @@ use tokio::net::TcpListener;
 use tokio::sync::Mutex;
 use tokio::sync::{mpsc, oneshot};
 
+use crate::transaction::TransactionRequest;
+
+mod address;
 mod blocklattice;
+mod transaction;
 
 #[derive(NetworkBehaviour)]
 #[behaviour(out_event = "OutEvent")]
@@ -90,7 +96,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
     // Create a channel for sending messages
     let (tx, _) = mpsc::channel(64);
 
-    let blocklattice: Arc<Mutex<BlockLattice>> = Arc::new(Mutex::new(BlockLattice::new()));
+    let blocklattice: Arc<Mutex<BlockLattice>> = Arc::new(Mutex::new(BlockLattice::new(
+        "confirmed_transactions".into(),
+        "pending_transactions".into(),
+    )));
     let blocklattice_clone = Arc::clone(&blocklattice);
 
     // Handle incoming messages
@@ -147,7 +156,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     });
 
     // Start HTTP RPC server
-    let addr = SocketAddr::from(([127, 0, 0, 1], 3000));
+    let addr = SocketAddr::from(([127, 0, 0, 1], 3001));
     let listener = TcpListener::bind(addr).await?;
     println!("RPC server listening on {}", addr);
 
@@ -262,17 +271,17 @@ async fn handle_request(
 
             println!("Transaction params: {:?}", params[0]);
 
+            let (tx, rx) = oneshot::channel();
             let params_clone = params[0].clone();
 
-            // Create a channel for the LMDB operation result
-            let (tx, rx) = oneshot::channel();
-
-            // Spawn LMDB thread with error logging
             thread::spawn(move || {
                 let result: Result<()> = (|| {
                     println!("Starting LMDB operation");
                     let env = lmdb::Environment::new()
                         .set_max_dbs(1)
+                        // Add these configuration options
+                        .set_map_size(10 * 1024 * 1024) // 10MB map size
+                        .set_max_readers(126)
                         .open(&Path::new("./local_db/transaction_db"))
                         .map_err(|e| anyhow!("Failed to open LMDB environment: {}", e))?;
 
@@ -284,16 +293,19 @@ async fn handle_request(
                         .begin_rw_txn()
                         .map_err(|e| anyhow!("Failed to begin transaction: {}", e))?;
 
+                    // Generate a fixed-size key (e.g., using a hash of the transaction)
+                    let key = {
+                        let mut hasher = Sha256::new();
+                        hasher.update(params_clone.to_string().as_bytes());
+                        hasher.finalize().to_vec()
+                    };
+
+                    // Serialize the transaction data
                     let serialized_tx = bincode::serialize(&params_clone)
                         .map_err(|e| anyhow!("Failed to serialize transaction: {}", e))?;
 
-                    txn.put(
-                        db,
-                        &params_clone.to_string(),
-                        &serialized_tx,
-                        lmdb::WriteFlags::empty(),
-                    )
-                    .map_err(|e| anyhow!("Failed to put data: {}", e))?;
+                    txn.put(db, &key, &serialized_tx, lmdb::WriteFlags::empty())
+                        .map_err(|e| anyhow!("Failed to put data: {}", e))?;
 
                     txn.commit()
                         .map_err(|e| anyhow!("Failed to commit transaction: {}", e))?;
@@ -314,7 +326,6 @@ async fn handle_request(
             let tx_request: TransactionRequest = serde_json::from_value(params[0].clone())
                 .map_err(|e| format!("Failed to parse transaction request: {}", e))?;
 
-            println!("Adding transaction to blocklattice");
             let mut blocklattice = blocklattice.lock().await;
 
             let tx_id = blocklattice.add_transaction(
@@ -323,6 +334,9 @@ async fn handle_request(
                 tx_request.amount,
                 VerifyingKey::from_bytes(&tx_request.public_key)
                     .map_err(|e| format!("Invalid public key: {}", e))?,
+                tx_request.timestamp,
+                tx_request.id,
+                tx_request.signature,
             )?;
 
             println!("Transaction added successfully with ID: {}", tx_id);

@@ -1,102 +1,23 @@
 use anyhow::{anyhow, Result};
-use chrono::Utc;
 use ed25519_dalek::Signature;
 use ed25519_dalek::VerifyingKey;
-use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
-use std::collections::{HashMap, HashSet, VecDeque};
-use std::hash::Hash;
+use lmdb::Cursor;
+use lmdb::Transaction as LmdbTransaction;
+use std::path::Path;
 
-const ALICE_ADDRESS: Address = Address([1; 32]);
-const BOB_ADDRESS: Address = Address([2; 32]);
-
-#[derive(Debug, PartialEq, Eq, Hash, Serialize, Deserialize, Clone, Copy)]
-pub struct Address(pub [u8; 32]);
-
-impl AsRef<[u8]> for Address {
-    fn as_ref(&self) -> &[u8] {
-        &self.0
-    }
-}
-
-#[derive(Default, Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct H256(pub [u8; 32]);
-
-impl std::fmt::Display for H256 {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", hex::encode(self.0))
-    }
-}
-
-#[derive(Default, Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct TransactionId(pub H256);
-
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct TransactionRequest {
-    pub from: Address,
-    pub to: Address,
-    pub amount: u64,
-    pub public_key: [u8; 32],
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-pub struct Transaction {
-    pub id: TransactionId,
-    pub from: Address,
-    pub to: Address,
-    pub amount: u64,
-    pub timestamp: i64,
-    pub signature: Option<Signature>,
-}
-
-impl Transaction {
-    pub fn new(from: Address, to: Address, amount: u64) -> Result<Self> {
-        let timestamp = Utc::now().timestamp_millis();
-
-        let id = Self::calculate_id(from, to, amount, timestamp)?;
-
-        Ok(Self {
-            id: TransactionId(H256(id)),
-            from,
-            to,
-            amount,
-            timestamp: Utc::now().timestamp_millis(),
-            signature: None,
-        })
-    }
-
-    pub fn calculate_id(
-        from: Address,
-        to: Address,
-        amount: u64,
-        timestamp: i64,
-    ) -> Result<[u8; 32]> {
-        let mut hasher = Sha256::new();
-        hasher.update(amount.to_be_bytes());
-        hasher.update(&from);
-        hasher.update(&to);
-        hasher.update(timestamp.to_be_bytes());
-
-        let hash = &hasher.finalize()[..];
-
-        let id: [u8; 32] = hash.try_into().expect("Wrong length");
-
-        Ok(id)
-    }
-}
-
+use crate::address::Address;
+use crate::transaction::RawTransaction;
+use crate::transaction::{Transaction, TransactionId};
 pub struct BlockLattice {
-    transactions: HashMap<TransactionId, Transaction>,
-    all_transaction_ids: HashSet<TransactionId>,
-    buffer_incoming_transactions: VecDeque<Transaction>,
+    confirmed_transactions_uri: String,
+    pending_transactions_uri: String,
 }
 
 impl BlockLattice {
-    pub fn new() -> Self {
+    pub fn new(confirmed_transactions_uri: String, pending_transactions_uri: String) -> Self {
         Self {
-            transactions: HashMap::new(),
-            all_transaction_ids: HashSet::new(),
-            buffer_incoming_transactions: VecDeque::new(),
+            confirmed_transactions_uri,
+            pending_transactions_uri,
         }
     }
 
@@ -106,54 +27,104 @@ impl BlockLattice {
         to: Address,
         amount: u64,
         public_key: VerifyingKey,
+        timestamp: i64,
+        id: TransactionId,
+        signature: Signature,
     ) -> Result<String> {
-        let transaction = Transaction::new(from, to, amount)?;
+        let transaction = Transaction {
+            from,
+            to,
+            amount,
+            timestamp,
+            id,
+            signature,
+        };
 
         if !Self::is_transaction_valid(transaction, public_key)? {
             return Err(anyhow!("Transaction is invalid"));
         }
 
-        Ok(transaction.id.clone().0.to_string())
+        Ok(hex::encode(transaction.id.clone().0))
     }
 
     pub fn is_transaction_valid(
         transaction: Transaction,
         public_key: VerifyingKey,
     ) -> Result<bool> {
-        let incoming_tx_id = Transaction::calculate_id(
+        let incoming_tx_id = RawTransaction::calculate_id(
             transaction.from,
             transaction.to,
             transaction.amount,
             transaction.timestamp,
         )?;
-        if TransactionId(H256(incoming_tx_id)) != transaction.id {
+
+        println!("{:?}", incoming_tx_id);
+
+        if TransactionId(incoming_tx_id) != transaction.id {
             return Err(anyhow!("Transaction ID invalid"));
         }
 
-        let signature = transaction
-            .signature
-            .ok_or(anyhow!("Signature is missing"))?;
-
         public_key
-            .verify_strict(&transaction.id.0 .0, &signature)
+            .verify_strict(&transaction.id.0, &transaction.signature)
             .map_err(|e| anyhow!("Signature verification failed: {}", e))?;
 
         Ok(true)
     }
 
-    pub fn get_transaction(&self, id: [u8; 32]) -> Option<&Transaction> {
-        self.transactions.get(&TransactionId(H256(id)))
+    pub fn get_transaction(&self, id: [u8; 32]) -> Result<Transaction> {
+        let env = lmdb::Environment::new()
+            .open(&Path::new(&self.confirmed_transactions_uri))
+            .map_err(|e| anyhow!("Failed to open LMDB environment: {}", e))?;
+
+        let db = env
+            .open_db(None)
+            .map_err(|e| anyhow!("Failed to open database: {}", e))?;
+
+        let reader = env
+            .begin_ro_txn()
+            .map_err(|e| anyhow!("Failed to begin transaction: {}", e))?;
+
+        let transaction_bytes = match reader.get(db, &id) {
+            Ok(bytes) => bytes,
+            Err(lmdb::Error::NotFound) => return Err(anyhow!("Transaction not found")),
+            Err(e) => return Err(anyhow!("Database error: {}", e)),
+        };
+
+        let transaction: Transaction = bincode::deserialize(transaction_bytes)
+            .map_err(|e| anyhow!("Failed to deserialize transaction: {}", e))?;
+
+        Ok(transaction)
     }
 
-    pub fn get_all_transaction_ids(&self) -> &HashSet<TransactionId> {
-        &self.all_transaction_ids
+    pub fn get_all_transaction_ids(&self) -> Result<Vec<TransactionId>> {
+        let env = lmdb::Environment::new()
+            .open(&Path::new(&self.confirmed_transactions_uri))
+            .map_err(|e| anyhow!("Failed to open LMDB environment: {}", e))?;
+
+        let db = env
+            .open_db(None)
+            .map_err(|e| anyhow!("Failed to open database: {}", e))?;
+
+        let reader = env
+            .begin_ro_txn()
+            .map_err(|e| anyhow!("Failed to begin transaction: {}", e))?;
+
+        let mut transaction_ids = Vec::new();
+
+        // Create a cursor to iterate through all entries
+        let mut cursor = reader
+            .open_ro_cursor(db)
+            .map_err(|e| anyhow!("Failed to create cursor: {}", e))?;
+
+        // cursor.iter() returns Result<(&[u8], &[u8])>
+        // First &[u8] is the key (transaction ID)
+        // Second &[u8] is the value (serialized transaction)
+        for (result, _) in cursor.iter() {
+            let mut id = [0u8; 32];
+            id.copy_from_slice(result);
+            transaction_ids.push(TransactionId(id));
+        }
+
+        Ok(transaction_ids)
     }
-}
-
-fn hex_to_owned_slice(hex_string: &str) -> [u8; 32] {
-    let bytes = hex::decode(hex_string).expect("Decoding failed");
-    let mut array = [0u8; 32];
-    array.copy_from_slice(&bytes);
-
-    array
 }
