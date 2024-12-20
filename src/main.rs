@@ -176,7 +176,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     loop {
         let (mut socket, _) = listener.accept().await?;
-        let tx: tokio::sync::mpsc::Sender<Vec<u8>> = tx.clone();
         let blocklattice = Arc::clone(&blocklattice);
 
         tokio::spawn(async move {
