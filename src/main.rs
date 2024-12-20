@@ -11,6 +11,7 @@ use libp2p::{
     swarm::{SwarmBuilder, SwarmEvent},
 };
 use lmdb::Transaction as LmdbTransaction;
+use once_cell::sync::Lazy;
 use serde_json::Value as JsonValue;
 use sha2::Digest;
 use sha2::Sha256;
@@ -30,6 +31,19 @@ use crate::transaction::TransactionRequest;
 mod address;
 mod blocklattice;
 mod transaction;
+
+static LMDB_ENV: Lazy<Arc<lmdb::Environment>> = Lazy::new(|| {
+    std::fs::create_dir_all("./local_db/transaction_db")
+        .expect("Failed to create transaction_db directory");
+    Arc::new(
+        lmdb::Environment::new()
+            .set_max_dbs(1)
+            .set_map_size(10 * 1024 * 1024)
+            .set_max_readers(126)
+            .open(&Path::new("./local_db/transaction_db"))
+            .expect("Failed to create LMDB environment"),
+    )
+});
 
 #[derive(NetworkBehaviour)]
 #[behaviour(out_event = "OutEvent")]
@@ -162,88 +176,114 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     loop {
         let (mut socket, _) = listener.accept().await?;
-        let tx = tx.clone();
+        let tx: tokio::sync::mpsc::Sender<Vec<u8>> = tx.clone();
         let blocklattice = Arc::clone(&blocklattice);
 
         tokio::spawn(async move {
-            let mut buf = [0; 1024];
+            let mut buf = [0; 8192]; // Increased buffer size
             match socket.read(&mut buf).await {
                 Ok(n) if n == 0 => {
                     println!("Connection closed by client");
                     return;
                 }
                 Ok(n) => {
-                    let req = String::from_utf8_lossy(&buf[..n]);
-                    println!("Received request: {}", req); // Log the received request
+                    let request = String::from_utf8_lossy(&buf[..n]);
 
-                    if let Ok(rpc_request) = serde_json::from_str::<serde_json::Value>(&req) {
-                        println!("Parsed JSON-RPC request: {:?}", rpc_request);
+                    // Parse HTTP request to get the body
+                    if let Some(body_start) = request.find("\r\n\r\n") {
+                        let body = &request[body_start + 4..];
+                        println!("Request body: {}", body);
 
-                        // Send the request to the P2P network
-                        if let Ok(req_str) = serde_json::to_string(&rpc_request) {
-                            if let Err(e) = tx.send(req_str.into_bytes()).await {
-                                eprintln!("Failed to send to P2P network: {:?}", e);
-                            }
-                        }
+                        match serde_json::from_str::<serde_json::Value>(body) {
+                            Ok(rpc_request) => {
+                                match handle_request(&rpc_request, blocklattice).await {
+                                    Ok(result) => {
+                                        let response = serde_json::json!({
+                                            "jsonrpc": "2.0",
+                                            "result": result,
+                                            "id": rpc_request["id"]
+                                        });
 
-                        // Handle it locally
-                        match handle_request(&rpc_request, blocklattice).await {
-                            Ok(result) => {
-                                let response = serde_json::json!({
-                                    "jsonrpc": "2.0",
-                                    "result": result,
-                                    "id": rpc_request["id"]
-                                });
-                                println!("Sending response: {:?}", response);
+                                        let response_body =
+                                            serde_json::to_string(&response).unwrap();
+                                        let http_response = format!(
+                                            "HTTP/1.1 200 OK\r\n\
+                                             Content-Type: application/json\r\n\
+                                             Content-Length: {}\r\n\
+                                             \r\n\
+                                             {}",
+                                            response_body.len(),
+                                            response_body
+                                        );
 
-                                match socket
-                                    .write_all(serde_json::to_string(&response).unwrap().as_bytes())
-                                    .await
-                                {
-                                    Ok(_) => {
-                                        if let Err(e) = socket.flush().await {
-                                            eprintln!("Failed to flush socket: {:?}", e);
+                                        if let Err(e) =
+                                            socket.write_all(http_response.as_bytes()).await
+                                        {
+                                            eprintln!("Failed to write response: {:?}", e);
                                         }
                                     }
-                                    Err(e) => eprintln!("Failed to write response: {:?}", e),
+                                    Err(e) => {
+                                        let error_response = serde_json::json!({
+                                            "jsonrpc": "2.0",
+                                            "error": {
+                                                "code": -32603,
+                                                "message": format!("Internal error: {}", e)
+                                            },
+                                            "id": rpc_request["id"]
+                                        });
+
+                                        let response_body =
+                                            serde_json::to_string(&error_response).unwrap();
+                                        let http_response = format!(
+                                            "HTTP/1.1 500 Internal Server Error\r\n\
+                                             Content-Type: application/json\r\n\
+                                             Content-Length: {}\r\n\
+                                             \r\n\
+                                             {}",
+                                            response_body.len(),
+                                            response_body
+                                        );
+
+                                        if let Err(e) =
+                                            socket.write_all(http_response.as_bytes()).await
+                                        {
+                                            eprintln!("Failed to write error response: {:?}", e);
+                                        }
+                                    }
                                 }
                             }
                             Err(e) => {
-                                eprintln!("Error handling request: {:?}", e);
                                 let error_response = serde_json::json!({
                                     "jsonrpc": "2.0",
                                     "error": {
-                                        "code": -32603,
-                                        "message": "Internal error",
-                                        "data": e.to_string()
+                                        "code": -32700,
+                                        "message": format!("Parse error: {}", e)
                                     },
-                                    "id": rpc_request["id"]
+                                    "id": null
                                 });
-                                if let Err(e) = socket
-                                    .write_all(
-                                        serde_json::to_string(&error_response).unwrap().as_bytes(),
-                                    )
-                                    .await
-                                {
-                                    eprintln!("Failed to write error response: {:?}", e);
+
+                                let response_body = serde_json::to_string(&error_response).unwrap();
+                                let http_response = format!(
+                                    "HTTP/1.1 400 Bad Request\r\n\
+                                     Content-Type: application/json\r\n\
+                                     Content-Length: {}\r\n\
+                                     \r\n\
+                                     {}",
+                                    response_body.len(),
+                                    response_body
+                                );
+
+                                if let Err(e) = socket.write_all(http_response.as_bytes()).await {
+                                    eprintln!("Failed to write parse error response: {:?}", e);
                                 }
                             }
                         }
                     } else {
-                        eprintln!("Failed to parse JSON-RPC request");
-                        let error_response = serde_json::json!({
-                            "jsonrpc": "2.0",
-                            "error": {
-                                "code": -32700,
-                                "message": "Parse error"
-                            },
-                            "id": null
-                        });
-                        if let Err(e) = socket
-                            .write_all(serde_json::to_string(&error_response).unwrap().as_bytes())
-                            .await
-                        {
-                            eprintln!("Failed to write parse error response: {:?}", e);
+                        eprintln!("Invalid HTTP request format");
+                        // Send 400 Bad Request response
+                        let error_response = "HTTP/1.1 400 Bad Request\r\n\r\n";
+                        if let Err(e) = socket.write_all(error_response.as_bytes()).await {
+                            eprintln!("Failed to write error response: {:?}", e);
                         }
                     }
                 }
@@ -277,19 +317,12 @@ async fn handle_request(
             thread::spawn(move || {
                 let result: Result<()> = (|| {
                     println!("Starting LMDB operation");
-                    let env = lmdb::Environment::new()
-                        .set_max_dbs(1)
-                        // Add these configuration options
-                        .set_map_size(10 * 1024 * 1024) // 10MB map size
-                        .set_max_readers(126)
-                        .open(&Path::new("./local_db/transaction_db"))
-                        .map_err(|e| anyhow!("Failed to open LMDB environment: {}", e))?;
 
-                    let db = env
+                    let db = LMDB_ENV
                         .create_db(None, lmdb::DatabaseFlags::empty())
                         .map_err(|e| anyhow!("Failed to create DB: {}", e))?;
 
-                    let mut txn = env
+                    let mut txn = LMDB_ENV
                         .begin_rw_txn()
                         .map_err(|e| anyhow!("Failed to begin transaction: {}", e))?;
 

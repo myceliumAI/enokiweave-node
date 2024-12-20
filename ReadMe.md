@@ -30,7 +30,7 @@ git clone https://github.com/enokiweave/enokiweave
 
 # Run the node
 ```bash
-git clone https://github.com/enokiweave/enokiweave
+cargo run --bin enokiweave
 ```
 
 # Send a transaction (the node needs to be running)

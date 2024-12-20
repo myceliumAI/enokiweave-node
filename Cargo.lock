@@ -1091,6 +1091,7 @@ dependencies = [
  "hyper",
  "libp2p",
  "lmdb",
+ "once_cell",
  "serde",
  "serde_json",
  "sha2",
