@@ -23,8 +23,8 @@ use std::thread;
 use tcp::tokio::Transport as TokioTransport;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
+use tokio::sync::oneshot;
 use tokio::sync::Mutex;
-use tokio::sync::{mpsc, oneshot};
 
 use crate::transaction::TransactionRequest;
 
@@ -106,9 +106,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     // Listen on all interfaces and whatever port the OS assigns
     swarm.listen_on("/ip4/0.0.0.0/tcp/0".parse()?)?;
-
-    // Create a channel for sending messages
-    let (tx, _) = mpsc::channel(64);
 
     let blocklattice: Arc<Mutex<BlockLattice>> = Arc::new(Mutex::new(BlockLattice::new(
         "confirmed_transactions".into(),
