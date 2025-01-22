@@ -26,6 +26,7 @@ pub struct TransactionRequest {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+#[allow(non_snake_case)]
 struct SignatureComponents {
     R: String,
     s: String,

@@ -1,4 +1,5 @@
 use address::Address;
+use anyhow::Result;
 use clap::Parser;
 use ed25519_dalek::Signer;
 use ed25519_dalek::SigningKey;
@@ -23,7 +24,7 @@ struct Args {
     recipient: String,
 }
 
-fn main() {
+fn main() -> Result<()> {
     let args = Args::parse();
 
     // Convert hex private key to bytes
@@ -49,8 +50,7 @@ fn main() {
         Address::from(sender_array),
         Address::from(recipient_array),
         args.amount,
-    )
-    .unwrap();
+    )?;
 
     let signature = signing_key.sign(&tx.id.0);
 
@@ -71,5 +71,7 @@ fn main() {
         }]
     });
 
-    println!("{}", serde_json::to_string_pretty(&json_output).unwrap());
+    println!("{}", serde_json::to_string_pretty(&json_output)?);
+
+    Ok(())
 }

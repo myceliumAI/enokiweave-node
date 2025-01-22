@@ -1,0 +1,1 @@
+cargo run --bin enokiweave -- --genesis-file-path ./setup/example_genesis_file --initial-peers-file-path ./setup/example_initial_peers_file

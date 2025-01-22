@@ -2,23 +2,46 @@ use anyhow::{anyhow, Result};
 use ed25519_dalek::Signature;
 use ed25519_dalek::VerifyingKey;
 use lmdb::Cursor;
+use lmdb::Database;
+use lmdb::Environment;
 use lmdb::Transaction as LmdbTransaction;
+use once_cell::sync::Lazy;
 use std::path::Path;
+use std::sync::Arc;
 
 use crate::address::Address;
 use crate::transaction::RawTransaction;
 use crate::transaction::{Transaction, TransactionId};
-pub struct BlockLattice {
-    confirmed_transactions_uri: String,
-    pending_transactions_uri: String,
+
+const DB_NAME: &'static str = "./local_db/transaction_db";
+
+static LMDB_ENV: Lazy<Arc<Environment>> = Lazy::new(|| {
+    std::fs::create_dir_all(DB_NAME)
+        .expect("Failed to create transaction_db directory");
+    Arc::new(
+        lmdb::Environment::new()
+            .set_max_dbs(1)
+            .set_map_size(10 * 1024 * 1024)
+            .set_max_readers(126)
+            .open(&Path::new(DB_NAME))
+            .expect("Failed to create LMDB environment"),
+    )
+});
+
+pub struct TransactionManager {
+    pub transaction_env: Arc<Environment>,
+    pub db: Database,
 }
 
-impl BlockLattice {
-    pub fn new(confirmed_transactions_uri: String, pending_transactions_uri: String) -> Self {
-        Self {
-            confirmed_transactions_uri,
-            pending_transactions_uri,
-        }
+impl TransactionManager {
+    pub fn new() -> Result<Self> {
+        let env = LMDB_ENV.clone();
+        let db = env.create_db(Some(DB_NAME), lmdb::DatabaseFlags::empty())?;
+
+        Ok(TransactionManager {
+            transaction_env: env,
+            db,
+        })
     }
 
     pub fn add_transaction(
@@ -72,19 +95,12 @@ impl BlockLattice {
     }
 
     pub fn get_transaction(&self, id: [u8; 32]) -> Result<Transaction> {
-        let env = lmdb::Environment::new()
-            .open(&Path::new(&self.confirmed_transactions_uri))
-            .map_err(|e| anyhow!("Failed to open LMDB environment: {}", e))?;
-
-        let db = env
-            .open_db(None)
-            .map_err(|e| anyhow!("Failed to open database: {}", e))?;
-
-        let reader = env
+        let reader = self
+            .transaction_env
             .begin_ro_txn()
             .map_err(|e| anyhow!("Failed to begin transaction: {}", e))?;
 
-        let transaction_bytes = match reader.get(db, &id) {
+        let transaction_bytes = match reader.get(self.db, &id) {
             Ok(bytes) => bytes,
             Err(lmdb::Error::NotFound) => return Err(anyhow!("Transaction not found")),
             Err(e) => return Err(anyhow!("Database error: {}", e)),
@@ -97,15 +113,8 @@ impl BlockLattice {
     }
 
     pub fn get_all_transaction_ids(&self) -> Result<Vec<TransactionId>> {
-        let env = lmdb::Environment::new()
-            .open(&Path::new(&self.confirmed_transactions_uri))
-            .map_err(|e| anyhow!("Failed to open LMDB environment: {}", e))?;
-
-        let db = env
-            .open_db(None)
-            .map_err(|e| anyhow!("Failed to open database: {}", e))?;
-
-        let reader = env
+        let reader = self
+            .transaction_env
             .begin_ro_txn()
             .map_err(|e| anyhow!("Failed to begin transaction: {}", e))?;
 
@@ -113,7 +122,7 @@ impl BlockLattice {
 
         // Create a cursor to iterate through all entries
         let mut cursor = reader
-            .open_ro_cursor(db)
+            .open_ro_cursor(self.db)
             .map_err(|e| anyhow!("Failed to create cursor: {}", e))?;
 
         // cursor.iter() returns Result<(&[u8], &[u8])>
