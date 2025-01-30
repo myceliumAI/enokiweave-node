@@ -59,8 +59,6 @@ where
     sig_bytes[..32].copy_from_slice(&R_array);
     sig_bytes[32..].copy_from_slice(&s_array);
 
-    println!("here: {:?}", &sig_bytes);
-
     Ok(Signature::from_bytes(&sig_bytes))
 }
 
