@@ -13,9 +13,11 @@ use libp2p::{
     swarm::{SwarmBuilder, SwarmEvent},
 };
 use lmdb::Transaction as LmdbTransaction;
+use serde::Deserialize;
 use serde_json::Value as JsonValue;
 use sha2::Digest;
 use sha2::Sha256;
+use std::collections::HashMap;
 use std::error::Error;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -33,6 +35,8 @@ use crate::transaction::TransactionRequest;
 mod address;
 mod transaction;
 mod transaction_manager;
+
+const DB_NAME: &'static str = "./local_db/transaction_db";
 
 #[derive(NetworkBehaviour)]
 #[behaviour(out_event = "OutEvent")]
@@ -57,13 +61,22 @@ enum OutEvent {
     Mdns(MdnsEvent),
 }
 
+#[derive(Deserialize)]
+pub struct GenesisArgs {
+    balances: HashMap<String, u64>,
+}
+
 #[derive(Parser)]
 #[command(version, about, long_about = None)]
 struct Args {
     #[arg(long)]
     genesis_file_path: String,
     #[arg(long)]
-    initial_peers_file_path: String,
+    initial_peers_file_path: Option<String>,
+    #[arg(long)]
+    initial_peers: Option<Vec<String>>,
+    #[arg(long, default_value = "3001")]
+    rpc_port: u16,
 }
 
 async fn handle_swarm_events(
@@ -140,71 +153,11 @@ fn are_all_peers_dead(peers: Vec<Multiaddr>, swarm: &mut Swarm<P2PBlockchainBeha
     return !any_peers_alive;
 }
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn Error>> {
-    tracing_subscriber::fmt().init();
-    let args = Args::parse();
-
-    // TODO: Create local_peer_id from the node's private key
-    let local_key = identity::Keypair::generate_ed25519();
-    let local_peer_id = PeerId::from(local_key.public());
-    trace!("Local peer id: {:?}", local_peer_id);
-    std::fs::create_dir_all("./local_db/transaction_db")
-        .expect("Failed to create transaction_db directory");
-
-    // Create a transport
-    let transport = {
-        let keypair = identity::Keypair::generate_ed25519();
-        let noise_config =
-            noise::Config::new(&keypair).expect("failed to construct the noise config");
-
-        TokioTransport::new(tcp::Config::default().nodelay(true))
-            .upgrade(Version::V1Lazy)
-            .authenticate(noise_config)
-            .multiplex(yamux::Config::default())
-            .boxed()
-    };
-    // Create a Floodsub topic
-    let floodsub_topic = Topic::new("blocks");
-
-    // Create a Swarm to manage peers and events
-    let mut swarm = {
-        let mdns = Mdns::new(Default::default(), local_peer_id)?;
-        let mut behaviour = P2PBlockchainBehaviour {
-            floodsub: Floodsub::new(local_peer_id),
-            mdns,
-        };
-
-        behaviour.floodsub.subscribe(floodsub_topic.clone());
-        SwarmBuilder::with_tokio_executor(transport, behaviour, local_peer_id).build()
-    };
-
-    let initial_peers = std::fs::read_to_string(&args.initial_peers_file_path)?
-        .lines()
-        .map(|s| s.parse::<Multiaddr>())
-        .collect::<Result<Vec<_>, _>>()?;
-
-    if are_all_peers_dead(initial_peers, &mut swarm) {
-        error!("No initial peers are alive and reachable");
-        return Err("No initial peers are alive and reachable".into());
-    }
-
-    // Listen on all interfaces and whatever port the OS assigns
-    swarm.listen_on("/ip4/0.0.0.0/tcp/0".parse()?)?;
-
-    let transaction_manger: Arc<Mutex<TransactionManager>> =
-        Arc::new(Mutex::new(TransactionManager::new()?));
-    let transaction_manger_clone = Arc::clone(&transaction_manger);
-
-    // Start handling incoming messages
-    tokio::spawn(handle_swarm_events(
-        swarm,
-        floodsub_topic.clone(),
-        transaction_manger_clone,
-    ));
-
-    // Start HTTP RPC server
-    let addr = SocketAddr::from(([127, 0, 0, 1], 3001));
+async fn run_http_rpc_server(
+    transaction_manger: Arc<Mutex<TransactionManager>>,
+    rpc_port: u16,
+) -> Result<(), Box<dyn Error>> {
+    let addr = SocketAddr::from(([127, 0, 0, 1], rpc_port));
     let listener = TcpListener::bind(addr).await?;
     info!("RPC server listening on {}", addr);
 
@@ -355,14 +308,13 @@ async fn handle_request(
 
                     let transaction_manager = transaction_manager_clone.lock().await;
 
-                    let mut txn =
-                        transaction_manager
-                            .transaction_env
-                            .begin_rw_txn()
-                            .map_err(|e| {
-                                error!("Failed to begin transaction: {}", e);
-                                anyhow!("Failed to begin transaction: {}", e)
-                            })?;
+                    let mut txn = transaction_manager
+                        .lmdb_transaction_env
+                        .begin_rw_txn()
+                        .map_err(|e| {
+                            error!("Failed to begin transaction: {}", e);
+                            anyhow!("Failed to begin transaction: {}", e)
+                        })?;
 
                     // Generate a fixed-size key (e.g., using a hash of the transaction)
                     let key = {
@@ -430,4 +382,94 @@ async fn handle_request(
             Err("Missing method".into())
         }
     }
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn Error>> {
+    tracing_subscriber::fmt().init();
+    let args = Args::parse();
+
+    // TODO: Create local_peer_id from the node's private key
+    let local_key = identity::Keypair::generate_ed25519();
+    let local_peer_id = PeerId::from(local_key.public());
+    trace!("Local peer id: {:?}", local_peer_id);
+
+    std::fs::create_dir_all("./local_db/transaction_db")
+        .expect("Failed to create transaction_db directory");
+    let transaction_manager: Arc<Mutex<TransactionManager>> =
+        Arc::new(Mutex::new(TransactionManager::new()?));
+
+    {
+        let genesis_content =
+            std::fs::read_to_string(&args.genesis_file_path).expect("Failed to read genesis file");
+        let genesis_args: GenesisArgs =
+            serde_json::from_str(&genesis_content).expect("Failed to parse genesis file");
+
+        let transaction_manager = transaction_manager.lock().await;
+
+        transaction_manager.load_genesis_transactions(genesis_args)?;
+    }
+
+    // Create a transport
+    let transport = {
+        let keypair = identity::Keypair::generate_ed25519();
+        let noise_config =
+            noise::Config::new(&keypair).expect("failed to construct the noise config");
+
+        TokioTransport::new(tcp::Config::default().nodelay(true))
+            .upgrade(Version::V1Lazy)
+            .authenticate(noise_config)
+            .multiplex(yamux::Config::default())
+            .boxed()
+    };
+    // Create a Floodsub topic
+    let floodsub_topic = Topic::new("blocks");
+
+    // Create a Swarm to manage peers and events
+    let mut swarm = {
+        let mdns = Mdns::new(Default::default(), local_peer_id)?;
+        let mut behaviour = P2PBlockchainBehaviour {
+            floodsub: Floodsub::new(local_peer_id),
+            mdns,
+        };
+
+        behaviour.floodsub.subscribe(floodsub_topic.clone());
+        SwarmBuilder::with_tokio_executor(transport, behaviour, local_peer_id).build()
+    };
+
+    let mut initial_peers = Vec::new();
+
+    if let Some(file_path) = &args.initial_peers_file_path {
+        initial_peers.extend(
+            std::fs::read_to_string(file_path)?
+                .lines()
+                .map(|s| s.parse::<Multiaddr>())
+                .collect::<Result<Vec<_>, _>>()?,
+        );
+    }
+
+    if let Some(peers) = args.initial_peers {
+        initial_peers.extend(
+            peers
+                .iter()
+                .map(|s| s.parse::<Multiaddr>())
+                .collect::<Result<Vec<_>, _>>()?,
+        );
+    }
+
+    are_all_peers_dead(initial_peers, &mut swarm);
+
+    // Listen on all interfaces and whatever port the OS assigns
+    swarm.listen_on("/ip4/0.0.0.0/tcp/0".parse()?)?;
+
+    // Start handling incoming messages
+    tokio::spawn(handle_swarm_events(
+        swarm,
+        floodsub_topic.clone(),
+        transaction_manager.clone(),
+    ));
+
+    run_http_rpc_server(transaction_manager, args.rpc_port).await?;
+
+    Ok(())
 }

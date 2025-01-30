@@ -30,7 +30,7 @@ git clone https://github.com/enokiweave/enokiweave
 
 # Run the node
 ```bash
-cargo run --bin enokiweave -- --genesis-file-path ./setup/example_genesis_file.json --initial-peers-file-path ./setup/example_initial_peers_file.txt
+cargo run --bin enokiweave -- --genesis-file-path ./setup/example_genesis_file.json --rpc_port 3001
 ```
 
 # Send a transaction (the node needs to be running)
