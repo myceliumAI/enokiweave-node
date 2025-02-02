@@ -57,6 +57,17 @@ curl -X POST http://localhost:3001 \
 }'
 ```
 
+# Get the balance of a given address
+```bash
+curl -X POST http://localhost:3001 \
+-H "Content-Type: application/json" \
+-d '{
+    "jsonrpc": "2.0",
+    "method": "addressBalance",
+    "params": "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20"
+}'
+```
+
 # Build a transaction that you can send via a JSON-RPC request
 ```bash
 cargo run --bin build-transaction -- \
