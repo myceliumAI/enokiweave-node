@@ -162,6 +162,8 @@ impl TransactionManager {
 
         txn.commit()?;
 
+        info!("Successfully added new transaction");
+
         Ok(hex::encode(transaction.id.clone().0))
     }
 
