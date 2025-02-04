@@ -187,7 +187,6 @@ async fn process_single_transaction(
                 VerifyingKey::from_bytes(&transaction.public_key)
                     .map_err(|e| anyhow!("Invalid public key: {}", e))?,
                 transaction.timestamp,
-                transaction.id,
                 transaction.signature,
             ) {
                 Ok(transaction_id) => {

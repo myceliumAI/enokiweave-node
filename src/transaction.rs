@@ -7,7 +7,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 use sha2::{Digest, Sha256};
 
 #[derive(Default, Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct TransactionId(pub [u8; 32]);
+pub struct TransactionHash(pub [u8; 32]);
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct TransactionRequest {
@@ -22,7 +22,7 @@ pub struct TransactionRequest {
     pub signature: Signature,
     pub timestamp: i64,
     #[serde(deserialize_with = "deserialize_hex_to_tx_id")]
-    pub id: TransactionId,
+    pub id: TransactionHash,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -91,7 +91,7 @@ where
     array.copy_from_slice(&bytes);
     Ok(Address::from(array))
 }
-fn deserialize_hex_to_tx_id<'de, D>(deserializer: D) -> Result<TransactionId, D::Error>
+fn deserialize_hex_to_tx_id<'de, D>(deserializer: D) -> Result<TransactionHash, D::Error>
 where
     D: Deserializer<'de>,
 {
@@ -103,36 +103,20 @@ where
         return Err(de::Error::custom("Invalid length for byte array"));
     }
     array.copy_from_slice(&bytes);
-    Ok(TransactionId(array))
+    Ok(TransactionHash(array))
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct Transaction {
-    pub id: TransactionId,
-    pub from: Address,
-    pub to: Address,
-    pub amount: u64,
-    pub timestamp: i64,
-    pub signature: Signature,
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-pub struct RawTransaction {
-    pub id: TransactionId,
     pub from: Address,
     pub to: Address,
     pub amount: u64,
     pub timestamp: i64,
 }
 
-impl RawTransaction {
+impl Transaction {
     pub fn new(from: Address, to: Address, amount: u64) -> Result<Self> {
-        let timestamp = Utc::now().timestamp_millis();
-
-        let id = Self::calculate_id(from, to, amount, timestamp)?;
-
         Ok(Self {
-            id: TransactionId(id),
             from,
             to,
             amount,
@@ -140,17 +124,12 @@ impl RawTransaction {
         })
     }
 
-    pub fn calculate_id(
-        from: Address,
-        to: Address,
-        amount: u64,
-        timestamp: i64,
-    ) -> Result<[u8; 32]> {
+    pub fn calculate_id(&self) -> Result<[u8; 32]> {
         let mut hasher = Sha256::new();
-        hasher.update(amount.to_be_bytes());
-        hasher.update(&from);
-        hasher.update(&to);
-        hasher.update(timestamp.to_be_bytes());
+        hasher.update(self.amount.to_be_bytes());
+        hasher.update(&self.from);
+        hasher.update(&self.to);
+        hasher.update(self.timestamp.to_be_bytes());
 
         let hash = &hasher.finalize()[..];
 
