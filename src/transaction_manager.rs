@@ -12,8 +12,7 @@ use std::sync::Arc;
 use tracing::info;
 
 use crate::address::{Address, ZERO_ADDRESS};
-use crate::transaction::RawTransaction;
-use crate::transaction::{Transaction, TransactionId};
+use crate::transaction::{Transaction, TransactionHash};
 use crate::GenesisArgs;
 use crate::DB_NAME;
 
@@ -37,10 +36,11 @@ enum TransactionStatus {
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
-struct StoredTransaction {
+struct TransactionRecord {
     transaction: Transaction,
-    id: TransactionId,
+    previous_transaction_hash: TransactionHash,
     status: TransactionStatus,
+    signature: Signature,
 }
 
 pub struct TransactionManager {
@@ -77,19 +77,24 @@ impl TransactionManager {
                 to: Address::from_hex(&address)?,
                 amount,
                 timestamp: 0,
-                id: TransactionId(transaction_id),
+            };
+
+            let transaction_record = TransactionRecord {
+                transaction,
+                previous_transaction_hash: TransactionHash([0u8; 32]),
                 signature: Signature::from_bytes(&[0u8; 64]),
+                status: TransactionStatus::Confirmed,
             };
 
             // Serialize the transaction
-            let serialized_tx = bincode::serialize(&transaction)
+            let serialized_transaction_record = bincode::serialize(&transaction_record)
                 .map_err(|e| anyhow!("Failed to serialize transaction: {}", e))?;
 
             // Use the transaction ID as the key
             txn.put(
                 self.db,
                 &format!("{}:0", &address),
-                &serialized_tx,
+                &serialized_transaction_record,
                 lmdb::WriteFlags::empty(),
             )
             .map_err(|e| anyhow!("Failed to put transaction in database: {}", e))?;
@@ -111,7 +116,6 @@ impl TransactionManager {
         amount: u64,
         public_key: VerifyingKey,
         timestamp: i64,
-        id: TransactionId,
         signature: Signature,
     ) -> Result<String> {
         let transaction = Transaction {
@@ -119,11 +123,9 @@ impl TransactionManager {
             to,
             amount,
             timestamp,
-            id,
-            signature,
         };
 
-        if !Self::is_transaction_valid(transaction, public_key)? {
+        if !Self::is_transaction_valid(transaction, public_key, signature)? {
             return Err(anyhow!("Transaction is invalid"));
         }
         let (balance, selfchain_height_from) =
@@ -151,10 +153,12 @@ impl TransactionManager {
         )
         .map_err(|e| anyhow!("Failed to put transaction in database: {}", e))?;
 
+        let transaction_id = format!("{}:{}", to.as_hex(), selfchain_height_to);
+
         // As well as the receiver personal chain
         txn.put(
             self.db,
-            &format!("{}:{}", to.as_hex(), selfchain_height_to),
+            &transaction_id,
             &serialized_tx,
             lmdb::WriteFlags::empty(),
         )
@@ -164,7 +168,7 @@ impl TransactionManager {
 
         info!("Successfully added new transaction");
 
-        Ok(hex::encode(transaction.id.clone().0))
+        Ok(transaction_id)
     }
 
     pub fn get_address_balance_and_selfchain_height(
@@ -216,26 +220,18 @@ impl TransactionManager {
     pub fn is_transaction_valid(
         transaction: Transaction,
         public_key: VerifyingKey,
+        signature: Signature,
     ) -> Result<bool> {
-        let incoming_tx_id = RawTransaction::calculate_id(
-            transaction.from,
-            transaction.to,
-            transaction.amount,
-            transaction.timestamp,
-        )?;
-
-        if TransactionId(incoming_tx_id) != transaction.id {
-            return Err(anyhow!("Transaction ID invalid"));
-        }
+        let transaction_id = transaction.calculate_id()?;
 
         public_key
-            .verify_strict(&transaction.id.0, &transaction.signature)
+            .verify_strict(&transaction_id, &signature)
             .map_err(|e| anyhow!("Signature verification failed: {}", e))?;
 
         Ok(true)
     }
 
-    pub fn get_transaction(&self, id: [u8; 32]) -> Result<Transaction> {
+    pub fn get_transaction(&self, id: String) -> Result<Transaction> {
         let reader = self
             .lmdb_transaction_env
             .begin_ro_txn()
@@ -253,7 +249,7 @@ impl TransactionManager {
         Ok(transaction)
     }
 
-    pub fn get_all_transaction_ids(&self) -> Result<Vec<TransactionId>> {
+    pub fn get_all_transaction_ids(&self) -> Result<Vec<TransactionHash>> {
         let reader = self
             .lmdb_transaction_env
             .begin_ro_txn()
@@ -272,7 +268,7 @@ impl TransactionManager {
         for (result, _) in cursor.iter() {
             let mut id = [0u8; 32];
             id.copy_from_slice(result);
-            transaction_ids.push(TransactionId(id));
+            transaction_ids.push(TransactionHash(id));
         }
 
         Ok(transaction_ids)

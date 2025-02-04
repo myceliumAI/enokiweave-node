@@ -4,6 +4,7 @@ use clap::Parser;
 use ed25519_dalek::Signer;
 use ed25519_dalek::SigningKey;
 use serde_json::json;
+use transaction::Transaction;
 
 mod address;
 mod transaction;
@@ -46,13 +47,13 @@ fn main() -> Result<()> {
         .try_into()
         .expect("Recipient address must be 32 bytes");
 
-    let tx = transaction::RawTransaction::new(
+    let tx = Transaction::new(
         Address::from(sender_array),
         Address::from(recipient_array),
         args.amount,
     )?;
 
-    let signature = signing_key.sign(&tx.id.0);
+    let signature = signing_key.sign(&tx.calculate_id()?);
 
     let json_output = json!({
         "jsonrpc": "2.0",
@@ -67,7 +68,7 @@ fn main() -> Result<()> {
                 "s": hex::encode(signature.s_bytes())
             },
             "timestamp": tx.timestamp,
-            "id": hex::encode(tx.id.0)
+            "id": hex::encode(tx.calculate_id()?)
         }]
     });
 
