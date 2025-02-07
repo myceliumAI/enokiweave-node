@@ -49,7 +49,6 @@ pub async fn run_http_rpc_server(
             match socket.read(&mut buf).await {
                 Ok(0) => {
                     trace!("Connection closed by client");
-                    return;
                 }
                 Ok(n) => {
                     let request = String::from_utf8_lossy(&buf[..n]);
