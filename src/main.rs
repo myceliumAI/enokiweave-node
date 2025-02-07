@@ -76,22 +76,24 @@ async fn handle_swarm_events(mut swarm: Swarm<P2PBlockchainBehaviour>) {
                 info!("Listening on {:?}", address);
             }
             SwarmEvent::Behaviour(OutEvent::Floodsub(FloodsubEvent::Message(_))) => {}
-            SwarmEvent::Behaviour(OutEvent::Mdns(MdnsEvent::Discovered(list))) => {
-                for (peer_id, _multiaddr) in list {
-                    swarm
-                        .behaviour_mut()
-                        .floodsub
-                        .add_node_to_partial_view(peer_id);
+            SwarmEvent::Behaviour(OutEvent::Mdns(mdns_event)) => match *mdns_event {
+                MdnsEvent::Discovered(list) => {
+                    for (peer_id, _multiaddr) in list {
+                        swarm
+                            .behaviour_mut()
+                            .floodsub
+                            .add_node_to_partial_view(peer_id);
+                    }
                 }
-            }
-            SwarmEvent::Behaviour(OutEvent::Mdns(MdnsEvent::Expired(list))) => {
-                for (peer_id, _multiaddr) in list {
-                    swarm
-                        .behaviour_mut()
-                        .floodsub
-                        .remove_node_from_partial_view(&peer_id);
+                MdnsEvent::Expired(list) => {
+                    for (peer_id, _multiaddr) in list {
+                        swarm
+                            .behaviour_mut()
+                            .floodsub
+                            .remove_node_from_partial_view(&peer_id);
+                    }
                 }
-            }
+            },
             _ => {}
         }
     }
