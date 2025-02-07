@@ -201,6 +201,20 @@ impl EncryptedExactAmount {
 
         Ok(a > b) // Check if difference is positive
     }
+
+    pub fn verify_equal(&self, other: &Self) -> Result<bool> {
+        // Subtract encrypted points
+        let diff_c1 = self.c1 - other.c1;
+        let diff_c2 = self.c2 - other.c2;
+
+        // Convert points to their affine form and compare against identity point
+        let identity = ProjectivePoint::IDENTITY.to_affine();
+        let c1_equals = diff_c1.to_affine() == identity;
+        let c2_equals = diff_c2.to_affine() == identity;
+
+        // Amounts are equal if both c1 and c2 differences are zero
+        Ok(c1_equals && c2_equals)
+    }
 }
 
 // Helper function to find exact discrete log for small values

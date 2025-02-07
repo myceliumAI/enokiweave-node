@@ -177,8 +177,15 @@ where
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EncryptedAmountProofs {
+    pub sender: EncryptedExactAmount,
+    pub recipient: EncryptedExactAmount,
+    pub quorum: EncryptedExactAmount,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Amount {
-    Confidential(EncryptedExactAmount),
+    Confidential(EncryptedAmountProofs),
     Public(u64),
 }
 
@@ -210,18 +217,18 @@ impl Transaction {
     pub fn new_confidential(
         from: Address,
         to: Address,
-        c1: ProjectivePoint,
-        c2: ProjectivePoint,
-        range_proof: RangeProof,
+        sender: EncryptedExactAmount,
+        recipient: EncryptedExactAmount,
+        quorum: EncryptedExactAmount,
         previous_transaction_id: TransactionHash,
     ) -> Result<Self> {
         Ok(Self {
             from,
             to,
-            amount: Amount::Confidential(EncryptedExactAmount {
-                c1,
-                c2,
-                range_proof,
+            amount: Amount::Confidential(EncryptedAmountProofs {
+                sender,
+                recipient,
+                quorum,
             }),
             timestamp: Utc::now().timestamp_millis(),
             previous_transaction_id,
@@ -296,9 +303,57 @@ impl Transaction {
         hasher.update(&self.to);
         match &self.amount {
             Amount::Confidential(amount) => {
-                hasher.update(amount.c1.to_affine().to_encoded_point(true).as_bytes());
-                hasher.update(amount.c2.to_affine().to_encoded_point(true).as_bytes());
-                hasher.update(amount.range_proof.to_bytes());
+                hasher.update(
+                    amount
+                        .sender
+                        .c1
+                        .to_affine()
+                        .to_encoded_point(true)
+                        .as_bytes(),
+                );
+                hasher.update(
+                    amount
+                        .sender
+                        .c2
+                        .to_affine()
+                        .to_encoded_point(true)
+                        .as_bytes(),
+                );
+                hasher.update(amount.sender.range_proof.to_bytes());
+                hasher.update(
+                    amount
+                        .recipient
+                        .c1
+                        .to_affine()
+                        .to_encoded_point(true)
+                        .as_bytes(),
+                );
+                hasher.update(
+                    amount
+                        .recipient
+                        .c2
+                        .to_affine()
+                        .to_encoded_point(true)
+                        .as_bytes(),
+                );
+                hasher.update(amount.recipient.range_proof.to_bytes());
+                hasher.update(
+                    amount
+                        .quorum
+                        .c1
+                        .to_affine()
+                        .to_encoded_point(true)
+                        .as_bytes(),
+                );
+                hasher.update(
+                    amount
+                        .quorum
+                        .c2
+                        .to_affine()
+                        .to_encoded_point(true)
+                        .as_bytes(),
+                );
+                hasher.update(amount.quorum.range_proof.to_bytes());
             }
             Amount::Public(amount) => {
                 hasher.update(amount.to_be_bytes());

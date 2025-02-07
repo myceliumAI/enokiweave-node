@@ -1,12 +1,15 @@
 use anyhow::anyhow;
+use anyhow::Context;
 use anyhow::Result;
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use clap::Parser;
+use enokiweave::transaction::EncryptedAmountProofs;
 use k256::ecdsa::signature::DigestSigner;
 use k256::ecdsa::signature::Signer;
 use k256::ecdsa::signature::Verifier;
 use k256::ecdsa::{Signature, SigningKey};
 use k256::elliptic_curve::sec1::ToEncodedPoint;
+use k256::PublicKey;
 use k256::SecretKey;
 use serde_json::json;
 
@@ -41,55 +44,92 @@ fn main() -> Result<()> {
     let args = Args::parse();
 
     // Convert hex private key to bytes
-    let private_key_bytes = hex::decode(args.private_key).expect("Invalid private key hex");
+    let private_key_bytes = hex::decode(&args.private_key)
+        .with_context(|| format!("Failed to decode private key hex: {}", args.private_key))?;
     let private_key_array: [u8; 32] = private_key_bytes
         .try_into()
-        .expect("Private key must be 32 bytes");
+        .map_err(|_| anyhow!("Private key must be exactly 32 bytes"))?;
 
-    let secret_key = SecretKey::from_bytes(&private_key_array.into())?;
+    let secret_key = SecretKey::from_bytes(&private_key_array.into())
+        .context("Failed to create secret key from bytes")?;
     let public_key = secret_key.public_key();
 
     // Convert hex addresses to bytes
-    let sender_bytes = hex::decode(args.sender).expect("Invalid sender address hex");
+    let sender_bytes = hex::decode(&args.sender)
+        .with_context(|| format!("Failed to decode sender address hex: {}", args.sender))?;
     let sender_array: [u8; 32] = sender_bytes
         .try_into()
-        .expect("Sender address must be 32 bytes");
+        .map_err(|_| anyhow!("Sender address must be exactly 32 bytes"))?;
 
-    let recipient_bytes = hex::decode(args.recipient).expect("Invalid recipient address hex");
+    let recipient_bytes = hex::decode(&args.recipient)
+        .with_context(|| format!("Failed to decode recipient address hex: {}", args.recipient))?;
     let recipient_array: [u8; 32] = recipient_bytes
         .try_into()
-        .expect("Recipient address must be 32 bytes");
+        .map_err(|_| anyhow!("Recipient address must be exactly 32 bytes"))?;
 
     let previous_transaction_id_bytes =
-        hex::decode(args.previous_transaction_id).expect("Invalid previous_transaction_id hex");
+        hex::decode(&args.previous_transaction_id).with_context(|| {
+            format!(
+                "Failed to decode previous transaction ID hex: {}",
+                args.previous_transaction_id
+            )
+        })?;
     let previous_transaction_id_array: [u8; 32] = previous_transaction_id_bytes
         .try_into()
-        .expect("Previous transaction ID must be 32 bytes");
+        .map_err(|_| anyhow!("Previous transaction ID must be exactly 32 bytes"))?;
 
-    let encrypted = EncryptedExactAmount::encrypt(args.amount, &public_key)?;
+    let sender_encrypted = EncryptedExactAmount::encrypt(args.amount, &public_key)
+        .context("Failed to encrypt amount for sender")?;
+    let recipient_encrypted = EncryptedExactAmount::encrypt(
+        args.amount,
+        &PublicKey::from_sec1_bytes(
+            &[0x02]
+                .iter()
+                .chain(recipient_array.iter())
+                .copied()
+                .collect::<Vec<u8>>(),
+        )
+        .context("Failed to create recipient public key")?,
+    )
+    .context("Failed to encrypt amount for recipient")?;
+
+    // Quorum encryption
+    let quorum_public_key = PublicKey::from_sec1_bytes(&[
+        0x02, 0x79, 0xBE, 0x66, 0x7E, 0xF9, 0xDC, 0xBB, 0xAC, 0x55, 0xA0, 0x62, 0x95, 0xCE, 0x87,
+        0x0B, 0x07, 0x02, 0x9B, 0xFC, 0xDB, 0x2D, 0xCE, 0x28, 0xD9, 0x59, 0xF2, 0x81, 0x5B, 0x16,
+        0xF8, 0x17, 0x98,
+    ])
+    .context("Failed to create quorum public key")?;
+
+    let quorum_encrypted = EncryptedExactAmount::encrypt(args.amount, &quorum_public_key)
+        .context("Failed to encrypt amount for quorum")?;
 
     let tx = Transaction::new(
         Address::from(sender_array),
         Address::from(recipient_array),
-        Amount::Confidential(encrypted.clone()),
+        Amount::Confidential(EncryptedAmountProofs {
+            sender: sender_encrypted.clone(),
+            recipient: recipient_encrypted.clone(),
+            quorum: quorum_encrypted.clone(),
+        }),
         TransactionHash(previous_transaction_id_array),
-    )?;
+    )
+    .context("Failed to create transaction")?;
 
-    // Calculate the message hash
-    let message = tx.calculate_id()?;
+    let message = tx
+        .calculate_id()
+        .context("Failed to calculate transaction ID")?;
 
-    // Create signing key and sign
-    let signing_key = SigningKey::from_bytes(&private_key_array.into())?;
+    let signing_key = SigningKey::from_bytes(&private_key_array.into())
+        .context("Failed to create signing key")?;
     let verifying_key = signing_key.verifying_key();
 
-    // Sign using the finalized message hash
     let signature: Signature = signing_key.sign(&message);
     let signature_bytes = signature.to_bytes();
 
-    // Verify the signature
     verifying_key
         .verify(&message, &signature)
-        .map_err(|e| anyhow!("Invalid signature: {}", e))?;
+        .context("Signature verification failed")?;
 
     let json_output = json!({
         "jsonrpc": "2.0",
@@ -99,9 +139,21 @@ fn main() -> Result<()> {
             "to": hex::encode(tx.to),
             "amount": {
                 "Confidential": {
-                    "range_proof": BASE64.encode(encrypted.range_proof.to_bytes()),
-                    "c1": BASE64.encode(encrypted.c1.to_affine().to_encoded_point(true).as_bytes()),
-                    "c2": BASE64.encode(encrypted.c2.to_affine().to_encoded_point(true).as_bytes())
+                    "sender": {
+                        "range_proof": BASE64.encode(sender_encrypted.range_proof.to_bytes()),
+                        "c1": BASE64.encode(sender_encrypted.c1.to_affine().to_encoded_point(true).as_bytes()),
+                        "c2": BASE64.encode(sender_encrypted.c2.to_affine().to_encoded_point(true).as_bytes())
+                    },
+                    "recipient": {
+                        "range_proof": BASE64.encode(recipient_encrypted.range_proof.to_bytes()),
+                        "c1": BASE64.encode(recipient_encrypted.c1.to_affine().to_encoded_point(true).as_bytes()),
+                        "c2": BASE64.encode(recipient_encrypted.c2.to_affine().to_encoded_point(true).as_bytes())
+                    },
+                    "quorum": {
+                        "range_proof": BASE64.encode(quorum_encrypted.range_proof.to_bytes()),
+                        "c1": BASE64.encode(quorum_encrypted.c1.to_affine().to_encoded_point(true).as_bytes()),
+                        "c2": BASE64.encode(quorum_encrypted.c2.to_affine().to_encoded_point(true).as_bytes())
+                    }
                 }
             },
             "public_key": hex::encode(verifying_key.to_encoded_point(false).as_bytes()),

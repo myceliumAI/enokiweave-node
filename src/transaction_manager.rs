@@ -135,7 +135,7 @@ impl TransactionManager {
         let transaction = Transaction {
             from,
             to,
-            amount,
+            amount: amount.clone(),
             timestamp,
             previous_transaction_id,
         };
@@ -161,6 +161,22 @@ impl TransactionManager {
         verifying_key
             .verify(&id, &signature)
             .map_err(|e| anyhow!("Invalid signature: {}", e))?;
+
+        match amount {
+            Amount::Public(_) => {}
+            Amount::Confidential(encrypted_amount_proofs) => {
+                encrypted_amount_proofs
+                    .sender
+                    .verify_equal(&encrypted_amount_proofs.recipient)?;
+                encrypted_amount_proofs
+                    .sender
+                    .verify_equal(&encrypted_amount_proofs.quorum)?;
+            }
+        }
+
+        if let Err(err) = self.verify_transaction_chain(&transaction) {
+            return Err(anyhow!("Insufficient balance: {}", err));
+        }
 
         if let Err(err) = self.verify_transaction_chain(&transaction) {
             return Err(anyhow!("Insufficient balance: {}", err));
@@ -227,12 +243,12 @@ impl TransactionManager {
         for window in commitments_chain.windows(2) {
             match (&window[0], &window[1]) {
                 (Amount::Confidential(current), Amount::Confidential(previous)) => {
-                    if !&current.verify_greater_than(&previous)? {
+                    if !&current.sender.verify_greater_than(&previous.sender)? {
                         return Ok(false);
                     }
                 }
                 (Amount::Confidential(current), Amount::Public(previous)) => {
-                    if !current.verify_greater_than_u64(*previous)? {
+                    if !current.sender.verify_greater_than_u64(*previous)? {
                         return Ok(false);
                     }
                 }
