@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Result};
+use anyhow::Result;
 use clap::Parser;
 use libp2p::futures::StreamExt;
 use libp2p::mdns::tokio::Tokio;
@@ -11,23 +11,15 @@ use libp2p::{
     mdns::{Behaviour as Mdns, Event as MdnsEvent},
     swarm::{SwarmBuilder, SwarmEvent},
 };
-use serde::Deserialize;
-use std::collections::HashMap;
 use std::error::Error;
 use std::sync::Arc;
 use tcp::tokio::Transport as TokioTransport;
 use tokio::sync::Mutex;
-use tracing::{error, info, trace, warn};
-use transaction_manager::TransactionManager;
+use tracing::{info, trace, warn};
 
-use crate::rpc::run_http_rpc_server;
-
-mod address;
-mod rpc;
-mod transaction;
-mod transaction_manager;
-
-const DB_NAME: &'static str = "./local_db/transaction_db";
+use enokiweave::rpc::run_http_rpc_server;
+use enokiweave::transaction_manager::GenesisArgs;
+use enokiweave::transaction_manager::TransactionManager;
 
 #[derive(NetworkBehaviour)]
 #[behaviour(out_event = "OutEvent")]
@@ -50,11 +42,6 @@ impl From<MdnsEvent> for OutEvent {
 enum OutEvent {
     Floodsub(FloodsubEvent),
     Mdns(MdnsEvent),
-}
-
-#[derive(Deserialize)]
-pub struct GenesisArgs {
-    balances: HashMap<String, u64>,
 }
 
 #[derive(Parser)]

@@ -1,20 +1,26 @@
 use anyhow::{anyhow, Result};
-use ed25519_dalek::Signature;
-use ed25519_dalek::VerifyingKey;
+use k256::ecdsa::signature::Verifier;
+use k256::ecdsa::Signature;
+use k256::ecdsa::VerifyingKey;
+use k256::PublicKey;
 use lmdb::Cursor;
 use lmdb::Database;
 use lmdb::Environment;
 use lmdb::Transaction as LmdbTransaction;
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 use tracing::info;
 
 use crate::address::{Address, ZERO_ADDRESS};
+use crate::serialization::signature::{deserialize_signature, serialize_signature};
+use crate::transaction::Amount;
 use crate::transaction::{Transaction, TransactionHash};
-use crate::GenesisArgs;
-use crate::DB_NAME;
+
+const DB_NAME: &'static str = "./local_db/transaction_db";
 
 static LMDB_ENV: Lazy<Arc<Environment>> = Lazy::new(|| {
     std::fs::create_dir_all(DB_NAME).expect("Failed to create transaction_db directory");
@@ -28,6 +34,11 @@ static LMDB_ENV: Lazy<Arc<Environment>> = Lazy::new(|| {
     )
 });
 
+#[derive(Deserialize)]
+pub struct GenesisArgs {
+    pub balances: HashMap<String, u64>,
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 enum TransactionStatus {
     Pending,
@@ -38,8 +49,11 @@ enum TransactionStatus {
 #[derive(Debug, Serialize, Deserialize, Clone)]
 struct TransactionRecord {
     transaction: Transaction,
-    previous_transaction_hash: TransactionHash,
     status: TransactionStatus,
+    #[serde(
+        serialize_with = "serialize_signature",
+        deserialize_with = "deserialize_signature"
+    )]
     signature: Signature,
 }
 
@@ -67,22 +81,21 @@ impl TransactionManager {
             .map_err(|e| anyhow!("Failed to begin transaction: {}", e))?;
 
         // Insert each genesis transaction into the database
-        for (i, (address, amount)) in genesis_args.balances.into_iter().enumerate() {
-            let mut transaction_id = [0u8; 32];
-            let bytes = i.to_be_bytes();
-            transaction_id[24..32].copy_from_slice(&bytes);
-
+        for (address, amount) in genesis_args.balances {
             let transaction = Transaction {
                 from: ZERO_ADDRESS,
                 to: Address::from_hex(&address)?,
-                amount,
+                amount: Amount::Public(amount),
                 timestamp: 0,
+                previous_transaction_id: TransactionHash([0u8; 32]),
             };
+
+            let genesis_signature = Signature::try_from([1u8; 64].as_ref())
+                .map_err(|e| anyhow!("Failed to create genesis signature: {}", e))?;
 
             let transaction_record = TransactionRecord {
                 transaction,
-                previous_transaction_hash: TransactionHash([0u8; 32]),
-                signature: Signature::from_bytes(&[0u8; 64]),
+                signature: genesis_signature,
                 status: TransactionStatus::Confirmed,
             };
 
@@ -93,7 +106,7 @@ impl TransactionManager {
             // Use the transaction ID as the key
             txn.put(
                 self.db,
-                &format!("{}:0", &address),
+                &format!("{}", &address),
                 &serialized_transaction_record,
                 lmdb::WriteFlags::empty(),
             )
@@ -113,26 +126,31 @@ impl TransactionManager {
         &mut self,
         from: Address,
         to: Address,
-        amount: u64,
-        public_key: VerifyingKey,
+        amount: Amount,
+        public_key: PublicKey,
         timestamp: i64,
         signature: Signature,
+        previous_transaction_id: TransactionHash,
     ) -> Result<String> {
         let transaction = Transaction {
             from,
             to,
             amount,
             timestamp,
+            previous_transaction_id,
         };
 
-        if !Self::is_transaction_valid(transaction, public_key, signature)? {
-            return Err(anyhow!("Transaction is invalid"));
-        }
-        let (balance, selfchain_height_from) =
-            self.get_address_balance_and_selfchain_height(from)?;
-        let (_, selfchain_height_to) = self.get_address_balance_and_selfchain_height(to)?;
-        if balance < amount {
-            return Err(anyhow!("Unsufficient balance"));
+        let message = transaction.calculate_id()?;
+
+        let verifying_key = VerifyingKey::from_affine(public_key.as_affine().clone())
+            .map_err(|e| anyhow!("Invalid public key: {}", e))?;
+
+        verifying_key
+            .verify(&message, &signature)
+            .map_err(|e| anyhow!("Invalid signature: {}", e))?;
+
+        if let Err(err) = self.verify_transaction_chain(&transaction) {
+            return Err(anyhow!("Insufficient balance: {}", err));
         }
 
         // write in the DB the transaction to both the recipient and the emitter
@@ -145,88 +163,70 @@ impl TransactionManager {
             .map_err(|e| anyhow!("Failed to begin transaction: {}", e))?;
 
         // We add the transaction to the sender personal chain
-        txn.put(
-            self.db,
-            &format!("{}:{}", from.as_hex(), selfchain_height_from),
-            &serialized_tx,
-            lmdb::WriteFlags::empty(),
-        )
-        .map_err(|e| anyhow!("Failed to put transaction in database: {}", e))?;
-
-        let transaction_id = format!("{}:{}", to.as_hex(), selfchain_height_to);
-
-        // As well as the receiver personal chain
-        txn.put(
-            self.db,
-            &transaction_id,
-            &serialized_tx,
-            lmdb::WriteFlags::empty(),
-        )
-        .map_err(|e| anyhow!("Failed to put transaction in database: {}", e))?;
+        txn.put(self.db, &message, &serialized_tx, lmdb::WriteFlags::empty())
+            .map_err(|e| anyhow!("Failed to put transaction in database: {}", e))?;
 
         txn.commit()?;
 
         info!("Successfully added new transaction");
 
-        Ok(transaction_id)
+        Ok(hex::encode(message))
     }
 
-    pub fn get_address_balance_and_selfchain_height(
-        &mut self,
-        address: Address,
-    ) -> Result<(u64, u32)> {
-        let mut balance: u64 = 0;
-
+    pub fn verify_transaction_chain(&self, transaction_to_verify: &Transaction) -> Result<bool> {
         let reader = self
             .lmdb_transaction_env
             .begin_ro_txn()
             .map_err(|e| anyhow!("Failed to begin transaction: {}", e))?;
 
-        let mut iterator = 0;
+        let mut found_last_public_transaction = false;
+        let mut current_transaction_id = transaction_to_verify.calculate_id()?;
+        let mut commitments_chain = Vec::<Amount>::new();
 
-        loop {
-            let key = format!("{}:{}", address.as_hex(), iterator);
-            let transaction_bytes = match reader.get(self.db, &key) {
+        while !found_last_public_transaction {
+            let transaction_bytes = match reader.get(self.db, &current_transaction_id) {
                 Ok(bytes) => bytes,
-                Err(lmdb::Error::NotFound) => break,
+                Err(lmdb::Error::NotFound) => {
+                    return Err(anyhow!(
+                        "Transaction not found: {:?}",
+                        current_transaction_id
+                    ))
+                }
                 Err(e) => return Err(anyhow!("Database error: {}", e)),
             };
 
-            let transaction: Transaction = bincode::deserialize(transaction_bytes)
+            let transaction_record: TransactionRecord = bincode::deserialize(transaction_bytes)
                 .map_err(|e| anyhow!("Failed to deserialize transaction: {}", e))?;
 
-            if transaction.from == address {
-                if balance < transaction.amount {
-                    return Err(anyhow!(
-                        "Balance underflow detected for address: {}",
-                        address.as_hex()
-                    ));
+            match transaction_record.transaction.amount {
+                Amount::Public(_amount) => {
+                    commitments_chain.push(transaction_record.transaction.amount);
+                    found_last_public_transaction = true;
                 }
-                balance -= transaction.amount;
-            } else if transaction.to == address {
-                balance += transaction.amount;
-            } else {
-                return Err(anyhow!(
-                    "Transaction {} does not have the address being checked as either sender or receiver",
-                    key
-                ));
+                Amount::Confidential(ref _confidential) => {
+                    let tx_record = transaction_to_verify.calculate_id()?;
+                    current_transaction_id = tx_record;
+                    commitments_chain.push(transaction_record.transaction.amount);
+                }
             }
-            iterator += 1;
         }
 
-        Ok((balance, iterator))
-    }
-
-    pub fn is_transaction_valid(
-        transaction: Transaction,
-        public_key: VerifyingKey,
-        signature: Signature,
-    ) -> Result<bool> {
-        let transaction_id = transaction.calculate_id()?;
-
-        public_key
-            .verify_strict(&transaction_id, &signature)
-            .map_err(|e| anyhow!("Signature verification failed: {}", e))?;
+        // Verify balance consistency between consecutive transactions
+        for window in commitments_chain.windows(2) {
+            match (&window[0], &window[1]) {
+                (Amount::Confidential(current), Amount::Confidential(previous)) => {
+                    if !&current.verify_greater_than(&previous)? {
+                        return Ok(false);
+                    }
+                }
+                (Amount::Confidential(current), Amount::Public(previous)) => {
+                    if !current.verify_greater_than_u64(*previous)? {
+                        return Ok(false);
+                    }
+                }
+                _ => continue,
+            }
+        }
 
         Ok(true)
     }

@@ -1,5 +1,4 @@
 use anyhow::{anyhow, Result};
-use ed25519_dalek::VerifyingKey;
 use serde_json::Value as JsonValue;
 use std::error::Error;
 use std::net::SocketAddr;
@@ -87,6 +86,7 @@ pub async fn run_http_rpc_server(
                                         }
                                     }
                                     Err(e) => {
+                                        error!("{:?}", e);
                                         let error_response = serde_json::json!({
                                             "jsonrpc": "2.0",
                                             "error": {
@@ -117,6 +117,7 @@ pub async fn run_http_rpc_server(
                                 }
                             }
                             Err(e) => {
+                                error!("{:?}", e);
                                 let error_response = serde_json::json!({
                                     "jsonrpc": "2.0",
                                     "error": {
@@ -179,15 +180,15 @@ async fn process_single_transaction(
     let mut manager = transaction_manager.lock().await;
 
     match request {
-        RPCRequest::Transfer(transaction) => {
+        RPCRequest::Transfer(transaction_request) => {
             match manager.add_transaction(
-                transaction.from,
-                transaction.to,
-                transaction.amount,
-                VerifyingKey::from_bytes(&transaction.public_key)
-                    .map_err(|e| anyhow!("Invalid public key: {}", e))?,
-                transaction.timestamp,
-                transaction.signature,
+                transaction_request.from,
+                transaction_request.to,
+                transaction_request.amount,
+                transaction_request.public_key.into(),
+                transaction_request.timestamp,
+                transaction_request.signature,
+                transaction_request.previous_transaction_id,
             ) {
                 Ok(transaction_id) => {
                     trace!("Transaction added successfully with ID: {}", transaction_id);
@@ -196,11 +197,12 @@ async fn process_single_transaction(
                 Err(e) => Err(anyhow!("Error processing transaction: {}", e)),
             }
         }
-        RPCRequest::GetBalance(address) => {
-            match manager.get_address_balance_and_selfchain_height(address) {
-                Ok((res, _)) => Ok(res.to_string()),
-                Err(e) => Err(anyhow!("Error getting balance: {}", e)),
-            }
+        RPCRequest::GetBalance(_) => {
+            // match manager.get_address_balance(address) {
+            //     Ok((res, _)) => Ok(res.to_string()),
+            //     Err(e) => Err(anyhow!("Error getting balance: {}", e)),
+            // }
+            todo!()
         }
     }
 }
