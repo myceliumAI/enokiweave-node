@@ -42,13 +42,13 @@ impl From<FloodsubEvent> for OutEvent {
 }
 impl From<MdnsEvent> for OutEvent {
     fn from(value: MdnsEvent) -> Self {
-        OutEvent::Mdns(value)
+        OutEvent::Mdns(Box::new(value))
     }
 }
 
 enum OutEvent {
     Floodsub(FloodsubEvent),
-    Mdns(MdnsEvent),
+    Mdns(Box<MdnsEvent>),
 }
 
 #[derive(Deserialize)]
@@ -112,7 +112,7 @@ fn are_all_peers_dead(peers: Vec<Multiaddr>, swarm: &mut Swarm<P2PBlockchainBeha
             warn!("No peers are alive and reachable");
         }
     }
-    return !any_peers_alive;
+    !any_peers_alive
 }
 
 #[tokio::main]

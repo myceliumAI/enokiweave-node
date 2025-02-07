@@ -115,6 +115,7 @@ pub struct Transaction {
 }
 
 impl Transaction {
+    #[allow(dead_code)]
     pub fn new(from: Address, to: Address, amount: u64) -> Result<Self> {
         Ok(Self {
             from,

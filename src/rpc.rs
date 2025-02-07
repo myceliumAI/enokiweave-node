@@ -47,7 +47,7 @@ pub async fn run_http_rpc_server(
         tokio::spawn(async move {
             let mut buf = [0; 8192];
             match socket.read(&mut buf).await {
-                Ok(n) if n == 0 => {
+                Ok(0) => {
                     trace!("Connection closed by client");
                     return;
                 }
@@ -215,7 +215,7 @@ async fn handle_rpc_request(
         Some("submitTransaction") => {
             let params = req["params"]
                 .as_array()
-                .ok_or_else(|| "Invalid params - expected array")?;
+                .ok_or("Invalid params - expected array")?;
 
             if params.is_empty() {
                 return Err("Empty params array".into());
@@ -248,7 +248,7 @@ async fn handle_rpc_request(
         Some("addressBalance") => {
             let params = req["params"]
                 .as_str()
-                .ok_or_else(|| "Invalid params - expected str")?;
+                .ok_or("Invalid params - expected str")?;
 
             let address = Address::from_hex(params)?;
             // Create response channel

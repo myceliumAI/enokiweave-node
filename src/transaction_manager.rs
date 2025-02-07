@@ -231,6 +231,7 @@ impl TransactionManager {
         Ok(true)
     }
 
+    #[allow(dead_code)]
     pub fn get_transaction(&self, id: String) -> Result<Transaction> {
         let reader = self
             .lmdb_transaction_env
@@ -249,6 +250,7 @@ impl TransactionManager {
         Ok(transaction)
     }
 
+    #[allow(dead_code)]
     pub fn get_all_transaction_ids(&self) -> Result<Vec<TransactionHash>> {
         let reader = self
             .lmdb_transaction_env
