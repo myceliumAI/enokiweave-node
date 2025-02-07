@@ -51,8 +51,7 @@ pub struct TransactionManager {
 impl TransactionManager {
     pub fn new() -> Result<Self> {
         let env = LMDB_ENV.clone();
-        let db = env
-            .create_db(None, lmdb::DatabaseFlags::empty())?;
+        let db = env.create_db(None, lmdb::DatabaseFlags::empty())?;
 
         Ok(TransactionManager {
             lmdb_transaction_env: env,
