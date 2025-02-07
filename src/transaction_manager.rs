@@ -140,13 +140,26 @@ impl TransactionManager {
             previous_transaction_id,
         };
 
-        let message = transaction.calculate_id()?;
+        let id = transaction.calculate_id()?;
+
+        let reader = self
+            .lmdb_transaction_env
+            .begin_ro_txn()
+            .map_err(|e| anyhow!("Failed to begin transaction: {}", e))?;
+
+        match reader.get(self.db, &id) {
+            Ok(_) => return Err(anyhow!("Transaction already exists in DB")),
+            Err(lmdb::Error::NotFound) => {}
+            Err(e) => return Err(anyhow!("Database error: {}", e)),
+        };
+
+        reader.abort();
 
         let verifying_key = VerifyingKey::from_affine(public_key.as_affine().clone())
             .map_err(|e| anyhow!("Invalid public key: {}", e))?;
 
         verifying_key
-            .verify(&message, &signature)
+            .verify(&id, &signature)
             .map_err(|e| anyhow!("Invalid signature: {}", e))?;
 
         if let Err(err) = self.verify_transaction_chain(&transaction) {
@@ -162,15 +175,14 @@ impl TransactionManager {
             .begin_rw_txn()
             .map_err(|e| anyhow!("Failed to begin transaction: {}", e))?;
 
-        // We add the transaction to the sender personal chain
-        txn.put(self.db, &message, &serialized_tx, lmdb::WriteFlags::empty())
+        txn.put(self.db, &id, &serialized_tx, lmdb::WriteFlags::empty())
             .map_err(|e| anyhow!("Failed to put transaction in database: {}", e))?;
 
         txn.commit()?;
 
         info!("Successfully added new transaction");
 
-        Ok(hex::encode(message))
+        Ok(hex::encode(id))
     }
 
     pub fn verify_transaction_chain(&self, transaction_to_verify: &Transaction) -> Result<bool> {
