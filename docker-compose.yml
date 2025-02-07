@@ -1,0 +1,17 @@
+version: '3.8'
+
+services:
+  enokiweave:
+    image: ${DOCKER_HUB_USERNAME}/enokiweave:latest
+    ports:
+      - "3001:3001"
+    volumes:
+      - enokiweave-data:/var/lib/enokiweave
+      - ./setup/example_genesis_file.json:/etc/enokiweave/genesis.json
+      - ./setup/example_initial_peers_file.txt:/etc/enokiweave/peers.txt
+    environment:
+      - RUST_LOG=info
+    restart: unless-stopped
+
+volumes:
+  enokiweave-data:
