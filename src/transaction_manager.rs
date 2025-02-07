@@ -106,7 +106,7 @@ impl TransactionManager {
             // Use the transaction ID as the key
             txn.put(
                 self.db,
-                &format!("{}", &address),
+                &Address::from_hex(&address)?.0,
                 &serialized_transaction_record,
                 lmdb::WriteFlags::empty(),
             )
@@ -180,7 +180,7 @@ impl TransactionManager {
             .map_err(|e| anyhow!("Failed to begin transaction: {}", e))?;
 
         let mut found_last_public_transaction = false;
-        let mut current_transaction_id = transaction_to_verify.calculate_id()?;
+        let mut current_transaction_id = transaction_to_verify.previous_transaction_id.0;
         let mut commitments_chain = Vec::<Amount>::new();
 
         while !found_last_public_transaction {
