@@ -7,7 +7,7 @@ use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::sync::{mpsc, oneshot, Mutex};
-use tracing::{error, info, trace, warn};
+use tracing::{error, info, trace};
 
 use crate::address::Address;
 use crate::transaction::TransactionRequest;

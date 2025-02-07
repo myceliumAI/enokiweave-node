@@ -1,20 +1,24 @@
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
+#[allow(dead_code)]
 pub const ZERO_ADDRESS: Address = Address([0; 32]);
 
 #[derive(Debug, PartialEq, Eq, Hash, Serialize, Deserialize, Clone, Copy)]
 pub struct Address(pub [u8; 32]);
 
 impl Address {
+    #[allow(dead_code)]
     pub fn new(data: [u8; 32]) -> Self {
         Self(data)
     }
 
+    #[allow(dead_code)]
     pub fn as_hex(&self) -> String {
         hex::encode(self.0)
     }
 
+    #[allow(dead_code)]
     pub fn from_hex(hex_address: &str) -> Result<Address> {
         let decoded = hex::decode(hex_address)?;
         let mut address = [0u8; 32];

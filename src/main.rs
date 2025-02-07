@@ -16,7 +16,7 @@ use std::error::Error;
 use std::sync::Arc;
 use tcp::tokio::Transport as TokioTransport;
 use tokio::sync::Mutex;
-use tracing::{info, trace};
+use tracing::{info, trace, warn};
 use transaction_manager::TransactionManager;
 
 use crate::rpc::run_http_rpc_server;

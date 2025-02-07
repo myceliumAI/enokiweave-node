@@ -127,14 +127,12 @@ impl Transaction {
     pub fn calculate_id(&self) -> Result<[u8; 32]> {
         let mut hasher = Sha256::new();
         hasher.update(self.amount.to_be_bytes());
-        hasher.update(&self.from);
-        hasher.update(&self.to);
+        hasher.update(self.from);
+        hasher.update(self.to);
         hasher.update(self.timestamp.to_be_bytes());
 
         let hash = &hasher.finalize()[..];
-
         let id: [u8; 32] = hash.try_into().expect("Wrong length");
-
         Ok(id)
     }
 }
