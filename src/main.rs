@@ -1,4 +1,3 @@
-use anyhow::{anyhow, Result};
 use clap::Parser;
 use libp2p::futures::StreamExt;
 use libp2p::mdns::tokio::Tokio;
@@ -17,7 +16,7 @@ use std::error::Error;
 use std::sync::Arc;
 use tcp::tokio::Transport as TokioTransport;
 use tokio::sync::Mutex;
-use tracing::{error, info, trace, warn};
+use tracing::{info, trace};
 use transaction_manager::TransactionManager;
 
 use crate::rpc::run_http_rpc_server;
@@ -27,7 +26,7 @@ mod rpc;
 mod transaction;
 mod transaction_manager;
 
-const DB_NAME: &'static str = "./local_db/transaction_db";
+const DB_NAME: &str = "./local_db/transaction_db";
 
 #[derive(NetworkBehaviour)]
 #[behaviour(out_event = "OutEvent")]
