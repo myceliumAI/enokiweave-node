@@ -23,7 +23,7 @@ static LMDB_ENV: Lazy<Arc<Environment>> = Lazy::new(|| {
             .set_max_dbs(1)
             .set_map_size(10 * 1024 * 1024)
             .set_max_readers(126)
-            .open(&Path::new(DB_NAME))
+            .open(Path::new(DB_NAME))
             .expect("Failed to create LMDB environment"),
     )
 });
