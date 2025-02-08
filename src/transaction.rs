@@ -1,10 +1,7 @@
 use anyhow::Result;
-use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
-use bulletproofs::RangeProof;
 use chrono::Utc;
-use k256::ecdh::diffie_hellman;
-use k256::ecdsa::{Signature, VerifyingKey};
-use k256::{elliptic_curve::sec1::ToEncodedPoint, ProjectivePoint, PublicKey, SecretKey};
+use k256::ecdsa::Signature;
+use k256::{elliptic_curve::sec1::ToEncodedPoint, PublicKey};
 use serde::de;
 use serde::{Deserialize, Deserializer, Serialize};
 use sha2::{Digest, Sha256};
@@ -12,65 +9,6 @@ use sha2::{Digest, Sha256};
 use crate::address::Address;
 use crate::confidential::EncryptedExactAmount;
 use crate::serialization::signature::{deserialize_signature, serialize_signature};
-
-#[derive(Debug, Clone)]
-pub struct StealthMetadata {
-    pub ephemeral_public_key: PublicKey,
-    pub view_tag: u8,
-}
-
-impl Serialize for StealthMetadata {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        use serde::ser::SerializeStruct;
-        let mut state = serializer.serialize_struct("StealthMetadata", 2)?;
-
-        // Convert PublicKey to bytes and then to base64
-        let key_bytes = self.ephemeral_public_key.to_sec1_bytes();
-        let key_base64 = BASE64.encode(key_bytes);
-
-        state.serialize_field("ephemeral_public_key", &key_base64)?;
-        state.serialize_field("view_tag", &self.view_tag)?;
-        state.end()
-    }
-}
-
-// Implement custom deserialization
-impl<'de> Deserialize<'de> for StealthMetadata {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        #[derive(Deserialize)]
-        struct Helper {
-            ephemeral_public_key: String,
-            view_tag: u8,
-        }
-
-        let helper = Helper::deserialize(deserializer)?;
-
-        // Convert base64 back to PublicKey
-        let key_bytes = BASE64
-            .decode(helper.ephemeral_public_key)
-            .map_err(serde::de::Error::custom)?;
-
-        let public_key =
-            PublicKey::from_sec1_bytes(&key_bytes).map_err(serde::de::Error::custom)?;
-
-        Ok(StealthMetadata {
-            ephemeral_public_key: public_key,
-            view_tag: helper.view_tag,
-        })
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct StealthTransaction {
-    pub transaction: Transaction,
-    pub stealth_metadata: Option<StealthMetadata>,
-}
 
 #[derive(Default, Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct TransactionHash(pub [u8; 32]);
@@ -107,7 +45,6 @@ pub struct TransactionRequest {
     pub timestamp: i64,
     #[serde(deserialize_with = "deserialize_hex_to_tx_id")]
     pub previous_transaction_id: TransactionHash,
-    pub stealth_metadata: Option<StealthMetadata>,
 }
 
 fn deserialize_hex_to_public_key<'de, D>(deserializer: D) -> Result<PublicKey, D::Error>
@@ -233,68 +170,6 @@ impl Transaction {
             timestamp: Utc::now().timestamp_millis(),
             previous_transaction_id,
         })
-    }
-
-    pub fn create_stealth(
-        from: Address,
-        receiver_pub: &PublicKey,
-        amount: Amount,
-        ephemeral_secret: &SecretKey,
-        previous_transaction_id: TransactionHash,
-    ) -> Result<(Self, StealthMetadata)> {
-        // Generate stealth address
-        let (stealth_address, _) = Address::generate_stealth(receiver_pub, ephemeral_secret)?;
-
-        // Create view tag (first byte of shared secret)
-        let shared_secret = diffie_hellman(
-            ephemeral_secret.to_nonzero_scalar(),
-            receiver_pub.as_affine(),
-        );
-        let view_tag = shared_secret.raw_secret_bytes()[0];
-
-        // Create the transaction
-        let transaction = Self {
-            from,
-            to: stealth_address,
-            amount,
-            timestamp: Utc::now().timestamp_millis(),
-            previous_transaction_id,
-        };
-
-        // Create stealth metadata
-        let stealth_metadata = StealthMetadata {
-            ephemeral_public_key: ephemeral_secret.public_key(),
-            view_tag,
-        };
-
-        Ok((transaction, stealth_metadata))
-    }
-
-    pub fn scan_stealth(
-        &self,
-        metadata: &StealthMetadata,
-        view_private_key: &SecretKey,
-        spend_public_key: &PublicKey,
-    ) -> Result<bool> {
-        // Compute shared secret
-        let shared_secret = diffie_hellman(
-            view_private_key.to_nonzero_scalar(),
-            metadata.ephemeral_public_key.as_affine(),
-        );
-
-        // Check view tag
-        if shared_secret.raw_secret_bytes()[0] != metadata.view_tag {
-            return Ok(false);
-        }
-
-        // Compute expected stealth address
-        let (expected_stealth_address, _) = Address::generate_stealth(
-            spend_public_key,
-            &SecretKey::from_bytes(shared_secret.raw_secret_bytes())?,
-        )?;
-
-        // Check if the transaction's destination matches the computed stealth address
-        Ok(self.to == expected_stealth_address)
     }
 
     pub fn calculate_id(&self) -> Result<[u8; 32]> {

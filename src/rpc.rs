@@ -6,7 +6,7 @@ use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::sync::{mpsc, oneshot, Mutex};
-use tracing::{error, info, trace, warn};
+use tracing::{error, info, trace};
 
 use crate::address::Address;
 use crate::transaction::TransactionRequest;
@@ -14,7 +14,7 @@ use crate::transaction_manager::TransactionManager;
 
 enum RPCRequest {
     Transfer(TransactionRequest),
-    GetBalance(Address),
+    GetBalance,
 }
 
 struct QueuedTransaction {
@@ -197,12 +197,8 @@ async fn process_single_transaction(
                 Err(e) => Err(anyhow!("Error processing transaction: {}", e)),
             }
         }
-        RPCRequest::GetBalance(_) => {
-            // match manager.get_address_balance(address) {
-            //     Ok((res, _)) => Ok(res.to_string()),
-            //     Err(e) => Err(anyhow!("Error getting balance: {}", e)),
-            // }
-            todo!()
+        RPCRequest::GetBalance => {
+            todo!("Fix manager.get_address_balance(address)")
         }
     }
 }
@@ -252,13 +248,13 @@ async fn handle_rpc_request(
                 .as_str()
                 .ok_or_else(|| "Invalid params - expected str")?;
 
-            let address = Address::from_hex(params)?;
+            let _address = Address::from_hex(params)?;
             // Create response channel
             let (response_sender, response_receiver) = oneshot::channel();
 
             // Create a special transaction request for balance query
             let queued_tx = QueuedTransaction {
-                request: RPCRequest::GetBalance(address),
+                request: RPCRequest::GetBalance,
                 response_sender,
             };
 

@@ -9,7 +9,6 @@ use lmdb::Environment;
 use lmdb::Transaction as LmdbTransaction;
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;

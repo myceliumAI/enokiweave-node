@@ -4,7 +4,6 @@ use anyhow::Result;
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use clap::Parser;
 use enokiweave::transaction::EncryptedAmountProofs;
-use k256::ecdsa::signature::DigestSigner;
 use k256::ecdsa::signature::Signer;
 use k256::ecdsa::signature::Verifier;
 use k256::ecdsa::{Signature, SigningKey};
@@ -18,8 +17,6 @@ use enokiweave::confidential::EncryptedExactAmount;
 use enokiweave::transaction::Amount;
 use enokiweave::transaction::Transaction;
 use enokiweave::transaction::TransactionHash;
-use sha2::Digest;
-use sha2::Sha256;
 
 #[derive(Parser)]
 #[command(version, about, long_about = None)]

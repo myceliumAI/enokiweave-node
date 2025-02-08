@@ -3,7 +3,6 @@ use ark_ff::PrimeField;
 use k256::elliptic_curve::ecdh::diffie_hellman;
 use k256::{elliptic_curve::sec1::ToEncodedPoint, PublicKey, SecretKey};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 
 pub const ZERO_ADDRESS: Address = Address([0; 32]);
 const THRESHOLD_FLAG: u8 = 0x80;
