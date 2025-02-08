@@ -1,4 +1,3 @@
-use anyhow::{anyhow, Result};
 use clap::Parser;
 use libp2p::futures::StreamExt;
 use libp2p::mdns::tokio::Tokio;
@@ -17,7 +16,7 @@ use std::error::Error;
 use std::sync::Arc;
 use tcp::tokio::Transport as TokioTransport;
 use tokio::sync::Mutex;
-use tracing::{error, info, trace, warn};
+use tracing::{info, trace, warn};
 use transaction_manager::TransactionManager;
 
 use crate::rpc::run_http_rpc_server;
@@ -27,7 +26,7 @@ mod rpc;
 mod transaction;
 mod transaction_manager;
 
-const DB_NAME: &'static str = "./local_db/transaction_db";
+const DB_NAME: &str = "./local_db/transaction_db";
 
 #[derive(NetworkBehaviour)]
 #[behaviour(out_event = "OutEvent")]
@@ -43,13 +42,13 @@ impl From<FloodsubEvent> for OutEvent {
 }
 impl From<MdnsEvent> for OutEvent {
     fn from(value: MdnsEvent) -> Self {
-        OutEvent::Mdns(value)
+        OutEvent::Mdns(Box::new(value))
     }
 }
 
 enum OutEvent {
     Floodsub(FloodsubEvent),
-    Mdns(MdnsEvent),
+    Mdns(Box<MdnsEvent>),
 }
 
 #[derive(Deserialize)]
@@ -77,22 +76,24 @@ async fn handle_swarm_events(mut swarm: Swarm<P2PBlockchainBehaviour>) {
                 info!("Listening on {:?}", address);
             }
             SwarmEvent::Behaviour(OutEvent::Floodsub(FloodsubEvent::Message(_))) => {}
-            SwarmEvent::Behaviour(OutEvent::Mdns(MdnsEvent::Discovered(list))) => {
-                for (peer_id, _multiaddr) in list {
-                    swarm
-                        .behaviour_mut()
-                        .floodsub
-                        .add_node_to_partial_view(peer_id);
+            SwarmEvent::Behaviour(OutEvent::Mdns(mdns_event)) => match *mdns_event {
+                MdnsEvent::Discovered(list) => {
+                    for (peer_id, _multiaddr) in list {
+                        swarm
+                            .behaviour_mut()
+                            .floodsub
+                            .add_node_to_partial_view(peer_id);
+                    }
                 }
-            }
-            SwarmEvent::Behaviour(OutEvent::Mdns(MdnsEvent::Expired(list))) => {
-                for (peer_id, _multiaddr) in list {
-                    swarm
-                        .behaviour_mut()
-                        .floodsub
-                        .remove_node_from_partial_view(&peer_id);
+                MdnsEvent::Expired(list) => {
+                    for (peer_id, _multiaddr) in list {
+                        swarm
+                            .behaviour_mut()
+                            .floodsub
+                            .remove_node_from_partial_view(&peer_id);
+                    }
                 }
-            }
+            },
             _ => {}
         }
     }
@@ -113,7 +114,7 @@ fn are_all_peers_dead(peers: Vec<Multiaddr>, swarm: &mut Swarm<P2PBlockchainBeha
             warn!("No peers are alive and reachable");
         }
     }
-    return !any_peers_alive;
+    !any_peers_alive
 }
 
 #[tokio::main]

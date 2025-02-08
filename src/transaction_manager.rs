@@ -23,7 +23,7 @@ static LMDB_ENV: Lazy<Arc<Environment>> = Lazy::new(|| {
             .set_max_dbs(1)
             .set_map_size(10 * 1024 * 1024)
             .set_max_readers(126)
-            .open(&Path::new(DB_NAME))
+            .open(Path::new(DB_NAME))
             .expect("Failed to create LMDB environment"),
     )
 });
@@ -51,7 +51,7 @@ pub struct TransactionManager {
 impl TransactionManager {
     pub fn new() -> Result<Self> {
         let env = LMDB_ENV.clone();
-        let db = env.create_db(Some(DB_NAME), lmdb::DatabaseFlags::empty())?;
+        let db = env.create_db(None, lmdb::DatabaseFlags::empty())?;
 
         Ok(TransactionManager {
             lmdb_transaction_env: env,
@@ -231,6 +231,7 @@ impl TransactionManager {
         Ok(true)
     }
 
+    #[allow(dead_code)]
     pub fn get_transaction(&self, id: String) -> Result<Transaction> {
         let reader = self
             .lmdb_transaction_env
@@ -249,6 +250,7 @@ impl TransactionManager {
         Ok(transaction)
     }
 
+    #[allow(dead_code)]
     pub fn get_all_transaction_ids(&self) -> Result<Vec<TransactionHash>> {
         let reader = self
             .lmdb_transaction_env

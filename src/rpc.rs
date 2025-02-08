@@ -7,7 +7,7 @@ use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::sync::{mpsc, oneshot, Mutex};
-use tracing::{error, info, trace, warn};
+use tracing::{error, info, trace};
 
 use crate::address::Address;
 use crate::transaction::TransactionRequest;
@@ -47,9 +47,8 @@ pub async fn run_http_rpc_server(
         tokio::spawn(async move {
             let mut buf = [0; 8192];
             match socket.read(&mut buf).await {
-                Ok(n) if n == 0 => {
+                Ok(0) => {
                     trace!("Connection closed by client");
-                    return;
                 }
                 Ok(n) => {
                     let request = String::from_utf8_lossy(&buf[..n]);
@@ -215,7 +214,7 @@ async fn handle_rpc_request(
         Some("submitTransaction") => {
             let params = req["params"]
                 .as_array()
-                .ok_or_else(|| "Invalid params - expected array")?;
+                .ok_or("Invalid params - expected array")?;
 
             if params.is_empty() {
                 return Err("Empty params array".into());
@@ -248,7 +247,7 @@ async fn handle_rpc_request(
         Some("addressBalance") => {
             let params = req["params"]
                 .as_str()
-                .ok_or_else(|| "Invalid params - expected str")?;
+                .ok_or("Invalid params - expected str")?;
 
             let address = Address::from_hex(params)?;
             // Create response channel
