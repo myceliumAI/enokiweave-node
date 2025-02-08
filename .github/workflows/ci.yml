@@ -136,6 +136,7 @@ jobs:
         run: |
           if [[ 
             "${{ github.event_name }}" == "push" && 
+            "${{ github.ref }}" == "refs/heads/main" &&
             "${{ needs.changes.outputs.core }}" == "true" 
           ]]; then
             echo "run=true" >> $GITHUB_OUTPUT
