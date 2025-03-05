@@ -7,6 +7,7 @@ use lmdb::Cursor;
 use lmdb::Database;
 use lmdb::Environment;
 use lmdb::Transaction as LmdbTransaction;
+use lmdb::{DatabaseFlags, WriteFlags};
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -16,10 +17,15 @@ use tracing::info;
 
 use crate::address::{Address, ZERO_ADDRESS};
 use crate::serialization::signature::{deserialize_signature, serialize_signature};
-use crate::transaction::Amount;
-use crate::transaction::{Transaction, TransactionHash};
+use crate::transaction::Input;
+use crate::transaction::Output;
+use crate::transaction::PublicInput;
+use crate::transaction::PublicOutput;
+use crate::transaction::Transaction;
+use crate::transaction_hash::TransactionHash;
 
 const DB_NAME: &'static str = "./local_db/transaction_db";
+const MERKLE_DB_NAME: &'static str = "./local_db/merkle_db";
 
 static LMDB_ENV: Lazy<Arc<Environment>> = Lazy::new(|| {
     std::fs::create_dir_all(DB_NAME).expect("Failed to create transaction_db directory");
@@ -29,6 +35,18 @@ static LMDB_ENV: Lazy<Arc<Environment>> = Lazy::new(|| {
             .set_map_size(10 * 1024 * 1024)
             .set_max_readers(126)
             .open(&Path::new(DB_NAME))
+            .expect("Failed to create LMDB environment"),
+    )
+});
+
+static MERKLE_LMDB_ENV: Lazy<Arc<Environment>> = Lazy::new(|| {
+    std::fs::create_dir_all(MERKLE_DB_NAME).expect("Failed to create merkle_db directory");
+    Arc::new(
+        lmdb::Environment::new()
+            .set_max_dbs(1)
+            .set_map_size(10 * 1024 * 1024)
+            .set_max_readers(126)
+            .open(&Path::new(MERKLE_DB_NAME))
             .expect("Failed to create LMDB environment"),
     )
 });
@@ -59,16 +77,20 @@ struct TransactionRecord {
 pub struct TransactionManager {
     pub lmdb_transaction_env: Arc<Environment>,
     pub db: Database,
+    pub merkle_db: Database,
 }
 
 impl TransactionManager {
     pub fn new() -> Result<Self> {
         let env = LMDB_ENV.clone();
-        let db = env.create_db(Some(DB_NAME), lmdb::DatabaseFlags::empty())?;
+        let db = env.create_db(Some(DB_NAME), DatabaseFlags::empty())?;
+        let merkle_env = MERKLE_LMDB_ENV.clone();
+        let merkle_db = merkle_env.create_db(Some(MERKLE_DB_NAME), DatabaseFlags::empty())?;
 
         Ok(TransactionManager {
             lmdb_transaction_env: env,
             db,
+            merkle_db,
         })
     }
 
@@ -82,9 +104,14 @@ impl TransactionManager {
         // Insert each genesis transaction into the database
         for (address, amount) in genesis_args.balances {
             let transaction = Transaction {
-                from: ZERO_ADDRESS,
-                to: Address::from_hex(&address)?,
-                amount: Amount::Public(amount),
+                inputs: vec![Input::Public(PublicInput {
+                    amount,
+                    owner: ZERO_ADDRESS,
+                })],    
+                outputs: vec![Output::Public(PublicOutput {
+                    amount,
+                    recipient: Address::from_hex(&address)?,
+                })],
                 timestamp: 0,
                 previous_transaction_id: TransactionHash([0u8; 32]),
             };
@@ -123,18 +150,15 @@ impl TransactionManager {
 
     pub fn add_transaction(
         &mut self,
-        from: Address,
-        to: Address,
-        amount: Amount,
-        public_key: PublicKey,
+        inputs: Vec<Input>,
+        outputs: Vec<Output>,
         timestamp: i64,
         signature: Signature,
         previous_transaction_id: TransactionHash,
     ) -> Result<String> {
         let transaction = Transaction {
-            from,
-            to,
-            amount: amount.clone(),
+            inputs,
+            outputs,
             timestamp,
             previous_transaction_id,
         };
@@ -154,31 +178,8 @@ impl TransactionManager {
 
         reader.abort();
 
-        let verifying_key = VerifyingKey::from_affine(public_key.as_affine().clone())
-            .map_err(|e| anyhow!("Invalid public key: {}", e))?;
-
-        verifying_key
-            .verify(&id, &signature)
-            .map_err(|e| anyhow!("Invalid signature: {}", e))?;
-
-        match amount {
-            Amount::Public(_) => {}
-            Amount::Confidential(encrypted_amount_proofs) => {
-                encrypted_amount_proofs
-                    .sender
-                    .verify_equal(&encrypted_amount_proofs.recipient)?;
-                encrypted_amount_proofs
-                    .sender
-                    .verify_equal(&encrypted_amount_proofs.quorum)?;
-            }
-        }
-
-        if let Err(err) = self.verify_transaction_chain(&transaction) {
-            return Err(anyhow!("Insufficient balance: {}", err));
-        }
-
-        if let Err(err) = self.verify_transaction_chain(&transaction) {
-            return Err(anyhow!("Insufficient balance: {}", err));
+        if let Err(err) = transaction.verify_amounts_consistency() {
+            return Err(anyhow!("{}", err));
         }
 
         // write in the DB the transaction to both the recipient and the emitter
@@ -200,62 +201,39 @@ impl TransactionManager {
         Ok(hex::encode(id))
     }
 
-    pub fn verify_transaction_chain(&self, transaction_to_verify: &Transaction) -> Result<bool> {
+    pub fn add_merkle_root(&self, root: &[u8; 32]) -> Result<()> {
+        let mut txn = self
+            .lmdb_transaction_env
+            .begin_rw_txn()
+            .map_err(|e| anyhow!("Failed to begin transaction: {}", e))?;
+
+        txn.put(self.merkle_db, root, &[], WriteFlags::empty())
+            .map_err(|e| anyhow!("Failed to put Merkle root in database: {}", e))?;
+
+        txn.commit()
+            .map_err(|e| anyhow!("Failed to commit Merkle root: {}", e))?;
+
+        Ok(())
+    }
+
+    pub fn get_merkle_roots(&self) -> Result<Vec<[u8; 32]>> {
         let reader = self
             .lmdb_transaction_env
             .begin_ro_txn()
             .map_err(|e| anyhow!("Failed to begin transaction: {}", e))?;
 
-        let mut found_last_public_transaction = false;
-        let mut current_transaction_id = transaction_to_verify.previous_transaction_id.0;
-        let mut commitments_chain = Vec::<Amount>::new();
+        let mut roots = Vec::new();
+        let mut cursor = reader
+            .open_ro_cursor(self.merkle_db)
+            .map_err(|e| anyhow!("Failed to create cursor: {}", e))?;
 
-        while !found_last_public_transaction {
-            let transaction_bytes = match reader.get(self.db, &current_transaction_id) {
-                Ok(bytes) => bytes,
-                Err(lmdb::Error::NotFound) => {
-                    return Err(anyhow!(
-                        "Transaction not found: {:?}",
-                        current_transaction_id
-                    ))
-                }
-                Err(e) => return Err(anyhow!("Database error: {}", e)),
-            };
-
-            let transaction_record: TransactionRecord = bincode::deserialize(transaction_bytes)
-                .map_err(|e| anyhow!("Failed to deserialize transaction: {}", e))?;
-
-            match transaction_record.transaction.amount {
-                Amount::Public(_amount) => {
-                    commitments_chain.push(transaction_record.transaction.amount);
-                    found_last_public_transaction = true;
-                }
-                Amount::Confidential(ref _confidential) => {
-                    let tx_record = transaction_to_verify.calculate_id()?;
-                    current_transaction_id = tx_record;
-                    commitments_chain.push(transaction_record.transaction.amount);
-                }
-            }
+        for (key, _) in cursor.iter() {
+            let mut root = [0u8; 32];
+            root.copy_from_slice(key);
+            roots.push(root);
         }
 
-        // Verify balance consistency between consecutive transactions
-        for window in commitments_chain.windows(2) {
-            match (&window[0], &window[1]) {
-                (Amount::Confidential(current), Amount::Confidential(previous)) => {
-                    if !&current.sender.verify_greater_than(&previous.sender)? {
-                        return Ok(false);
-                    }
-                }
-                (Amount::Confidential(current), Amount::Public(previous)) => {
-                    if !current.sender.verify_greater_than_u64(*previous)? {
-                        return Ok(false);
-                    }
-                }
-                _ => continue,
-            }
-        }
-
-        Ok(true)
+        Ok(roots)
     }
 
     pub fn get_transaction(&self, id: String) -> Result<Transaction> {

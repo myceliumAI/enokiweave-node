@@ -9,8 +9,8 @@ use tokio::sync::{mpsc, oneshot, Mutex};
 use tracing::{error, info, trace};
 
 use crate::address::Address;
-use crate::transaction::TransactionRequest;
 use crate::transaction_manager::TransactionManager;
+use crate::transaction_request::TransactionRequest;
 
 enum RPCRequest {
     Transfer(TransactionRequest),
@@ -182,10 +182,8 @@ async fn process_single_transaction(
     match request {
         RPCRequest::Transfer(transaction_request) => {
             match manager.add_transaction(
-                transaction_request.from,
-                transaction_request.to,
-                transaction_request.amount,
-                transaction_request.public_key.into(),
+                transaction_request.inputs,
+                transaction_request.outputs,
                 transaction_request.timestamp,
                 transaction_request.signature,
                 transaction_request.previous_transaction_id,

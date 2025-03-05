@@ -3,4 +3,8 @@ pub mod confidential;
 pub mod rpc;
 pub mod serialization;
 pub mod transaction;
+pub mod transaction_builder;
+pub mod transaction_hash;
 pub mod transaction_manager;
+pub mod transaction_request;
+pub mod utils;

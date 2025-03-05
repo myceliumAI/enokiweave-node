@@ -11,7 +11,7 @@ Enokiweave is a block-lattice cryptocurrency designed for sub-second transaction
 
 ## How It Works
 
-Enokiweave uses a block-lattice structure where each account operates its own blockchain. This allows for:
+Enokiweave uses a directed acyclic graph structure which allows for:
 
 - Immediate transaction processing without global consensus bottlenecks
 - Parallel validation of transactions across different account chains
@@ -90,9 +90,7 @@ curl -X POST http://localhost:3001 \
 # Build a transaction that you can send via a JSON-RPC request
 ```bash
 cargo run --bin build-transaction -- \
---sender 0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20 \
---recipient 201f1e1d1c1b1a191817161514131211100f0e0d0c0b0a090807060504030201 \
+--recipient-pubkey 04e29636fe0c4c8a9971407f70e957708d6c98dc23ae91a5426e18f3bca7c4f3cf8d86f89b7091202f9a3168a254eaa29ab882157132c4cb91c218e3dba76c1b16 \
 --amount 100 \
---private-key 00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff \
---previous-transaction-id 0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20
+--inputs 00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff:0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20
 ```

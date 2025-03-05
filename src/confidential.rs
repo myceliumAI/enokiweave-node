@@ -1,14 +1,21 @@
 use anyhow::{anyhow, Result};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use bulletproofs::{BulletproofGens, PedersenGens, RangeProof};
+use k256::elliptic_curve::group::GroupEncoding;
 use k256::elliptic_curve::rand_core::OsRng;
 use k256::elliptic_curve::sec1::FromEncodedPoint;
+use k256::elliptic_curve::PrimeField;
+use k256::Scalar;
 use k256::{
     elliptic_curve::{sec1::ToEncodedPoint, Field},
     ProjectivePoint, PublicKey, SecretKey,
 };
 use merlin::Transcript;
 use serde::{Deserialize, Serialize};
+use sha2::digest::generic_array::{GenericArray, typenum};
+use sha2::{Digest, Sha256};
+
+use crate::utils::hash_to_curve;
 
 #[derive(Debug, Clone)]
 pub struct EncryptedExactAmount {
@@ -241,4 +248,109 @@ fn find_exact_discrete_log(point: ProjectivePoint) -> Result<u64> {
     }
 
     Err(anyhow!("Could not find exact value"))
+}
+
+#[derive(Debug, Clone)]
+pub struct ShieldedAmount {
+    // Pedersen commitment to amount
+    pub value_commitment: ProjectivePoint,
+    // Bulletproof range proof
+    pub range_proof: RangeProof,
+    // Commitment to spending key
+    pub spending_key_commitment: ProjectivePoint,
+    // Nullifier for preventing double-spends
+    pub nullifier: ProjectivePoint,
+    // Encrypted amount for recipient
+    pub encrypted_amount: EncryptedExactAmount,
+}
+
+impl ShieldedAmount {
+    pub fn new(
+        amount: u64,
+        spending_key: &SecretKey,
+        recipient_key: &PublicKey,
+        blinding: Scalar,
+    ) -> Result<Self> {
+        // Create Pedersen commitment to amount
+        let value_commitment = commit_amount(amount, blinding)?;
+
+        // Create range proof
+        let pc_gens = PedersenGens::default();
+        let bp_gens = BulletproofGens::new(64, 1);
+        let mut prover_transcript = Transcript::new(b"amount_range_proof");
+        let bp_blinding = curve25519_dalek::scalar::Scalar::random(&mut OsRng);
+        let (range_proof, _) = RangeProof::prove_single(
+            &bp_gens,
+            &pc_gens,
+            &mut prover_transcript,
+            amount,
+            &bp_blinding,
+            64,
+        )?;
+
+        
+        // Create spending key commitment
+        let spending_key_commitment =
+        ProjectivePoint::GENERATOR * (*spending_key.to_nonzero_scalar());
+        
+        // Create nullifier
+        let nullifier = create_nullifier(spending_key, value_commitment)?;
+        
+        // Encrypt amount for recipient
+        let encrypted_amount = EncryptedExactAmount::encrypt(amount, recipient_key)?;
+
+        Ok(Self {
+            value_commitment,
+            range_proof,
+            spending_key_commitment,
+            nullifier,
+            encrypted_amount,
+        })
+    }
+
+    pub fn verify(&self) -> Result<bool> {
+        // Verify range proof
+        let mut transcript = Transcript::new(b"shielded_amount");
+        let pc_gens = PedersenGens::default();
+        let bp_gens = BulletproofGens::new(64, 1);
+
+        // Convert commitment to CompressedRistretto
+        let point_bytes = self.value_commitment.to_affine().to_encoded_point(false);
+        let compressed =
+            curve25519_dalek::ristretto::CompressedRistretto::from_slice(point_bytes.as_bytes())?;
+
+        self.range_proof
+            .verify_single(&bp_gens, &pc_gens, &mut transcript, &compressed, 64)?;
+
+        // No need to verify nullifier construction as it's checked during spend
+        Ok(true)
+    }
+}
+
+pub fn commit_amount(amount: u64, blinding: Scalar) -> Result<ProjectivePoint> {
+    let g = ProjectivePoint::GENERATOR;
+    // Use second generator point H for Pedersen commitments
+    let h_bytes = [
+        0x02, 0x50, 0x92, 0x9b, 0x74, 0xc1, 0xa0, 0x49, 0x54, 0xb7, 0x8b, 0x4b, 0x60, 0x35, 0xe9,
+        0x7a, 0x5e, 0x07, 0x8a, 0x5a, 0x0f, 0x28, 0xec, 0x96, 0xd5, 0x47, 0xbf, 0xee, 0x9a, 0xce,
+        0x80, 0x3a, 0xc0,
+    ];
+    let h: ProjectivePoint = Option::from(ProjectivePoint::from_bytes(&h_bytes.into()))
+        .ok_or_else(|| anyhow!("Invalid H generator point"))?;
+    Ok(g * Scalar::from(amount) + h * blinding)
+}
+
+pub fn create_nullifier(
+    spending_key: &SecretKey,
+    commitment: ProjectivePoint,
+) -> Result<ProjectivePoint> {
+    let mut hasher = Sha256::new();
+    hasher.update(spending_key.to_bytes());
+    // Use compressed point format which is always 33 bytes, take first 32
+    let commitment_bytes = commitment.to_affine().to_encoded_point(true);
+    let mut bytes = [0u8; 32];
+    bytes.copy_from_slice(&commitment_bytes.as_bytes()[1..33]);
+    let array: GenericArray<u8, typenum::U32> = GenericArray::clone_from_slice(&bytes);
+    let hash = hash_to_curve(array)?;
+    Ok(hash * *spending_key.to_nonzero_scalar())
 }
